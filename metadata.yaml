@@ -1,2 +1,5 @@
 homepage: "https://github.com/the-ad-guy/utm-tracker"
 documentation: "https://github.com/the-ad-guy/utm-tracker#readme"
+versions:
+  - sha: 20ff74cf4ddb718cc187ef3c0712edc43c7f4f9c
+    changeNotes: Initial release.
