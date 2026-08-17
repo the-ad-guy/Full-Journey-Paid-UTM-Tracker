@@ -1,0 +1,334 @@
+<!--
+  ROCS — Tag 1: attribution entry tracking + cookie state
+  ========================================================
+  Deploy as a GTM Custom HTML tag, trigger = Initialization - All Pages.
+  Firing on Initialization writes the cookies before any tag that reads them
+  (the enroll injector, analytics) and guarantees order without tag sequencing.
+
+  What it does, on every page load:
+    1. Removes duplicate host-only first_paid_utm / recent_paid_utm cookies
+       (a legacy writer created host-only copies; see "remediation" below).
+    2. Decides whether this page view is a new SITE ENTRY or internal
+       navigation, using a 30-minute rolling session cookie (rocs_sess).
+    3. On a qualifying entry, classifies the channel with this precedence:
+         paid > email > organic_search > organic_social > referral > direct
+    4. Maintains three independent attribution layers that never overwrite
+       each other:
+         PAID    first_paid_utm  (full URL, set once - legacy format)
+                 recent_paid_utm (full URL, replaced per paid entry - legacy)
+                 latest click IDs per type (rocs_attr.ids)
+         OVERALL first / recent traffic channel (rocs_attr.ftc / .rtc)
+         NONPAID first / recent nonpaid channel + referrer domain
+                 (rocs_attr.fnc/.fnr/.rnc/.rnr)
+
+  Cookies written (all: domain=.rocs.org; path=/; SameSite=Lax; Secure):
+    first_paid_utm   full first paid landing URL. 730d. SET ONCE. Legacy
+                     format - consumed by ROCS forms. Never change format.
+    recent_paid_utm  full latest paid landing URL. 730d. Legacy format.
+    rocs_attr        URL-encoded JSON, 730d:
+                     { v:1,
+                       ftc: first traffic channel   (set once),
+                       rtc: recent traffic channel,
+                       fnc: first nonpaid channel   (set once),
+                       fnr: first nonpaid referrer domain (set with fnc),
+                       rnc: recent nonpaid channel,
+                       rnr: recent nonpaid referrer domain
+                            (DELETED, not blanked, on direct entries),
+                       ids: { gclid, gbraid, wbraid, fbclid, msclkid,
+                              ttclid, li_fat_id }  latest value per type }
+    rocs_sess        URL-encoded JSON { ts, ch }, 30-minute rolling expiry,
+                     refreshed every page view. ts = last activity,
+                     ch = channel of the current session's entry.
+                     A cookie (not sessionStorage) so state is shared
+                     across tabs and inactivity expiry comes free.
+
+  "Paid" = URL has gclid | gbraid | wbraid | fbclid | msclkid | ttclid |
+  li_fat_id | gad_source, OR utm_medium is in PAID_UTM_MEDIUMS (cpc, paid).
+  utm_source alone NEVER means paid. gad_source is a detection signal only;
+  no latest-ID storage for it. NOTE: the fake "lidcid" parameter from the
+  old version was removed; li_fat_id is LinkedIn's real click ID.
+
+  Hard rules:
+    - Nonpaid entries never touch first_paid_utm / recent_paid_utm / ids.
+    - Paid entries never touch the nonpaid layer.
+    - "direct" means "no detectable referrer or source" - browsers, apps,
+      privacy settings, redirects and referrer policies can all suppress
+      the referrer. We do not guess.
+    - Internal navigation (rocs.org, *.rocs.org - exact hostname suffix
+      match, never substring) updates nothing except the session marker.
+    - Every read is wrapped so a malformed cookie can never break the tag.
+
+  Paired consumers:
+    - "Enroll Now UTM Injector" (Tag 2) reads all of the above and
+      decorates enroll.rocs.org links.
+    - Landing-page forms read first_paid_utm / recent_paid_utm (unchanged).
+-->
+<script>
+(function () {
+  'use strict';
+
+  // ================================ CONFIG ================================
+  var DEBUG = false;                  // true = verbose console logging
+  var COOKIE_EXPIRATION_DAYS = 730;   // attribution lifetime (Safari ITP caps JS cookies at ~7d regardless)
+  var SESSION_MINUTES = 30;           // inactivity window defining a session
+  var COOKIE_DOMAIN = '.rocs.org';
+
+  var FIRST_PAID_COOKIE = 'first_paid_utm';    // legacy - format frozen
+  var RECENT_PAID_COOKIE = 'recent_paid_utm';  // legacy - format frozen
+  var ATTR_COOKIE = 'rocs_attr';
+  var SESS_COOKIE = 'rocs_sess';
+
+  // Latest-stored click IDs. KEEP IN SYNC with CLICK_IDS in Tag 2.
+  var CLICK_IDS = ['gclid', 'gbraid', 'wbraid', 'fbclid', 'msclkid', 'ttclid', 'li_fat_id'];
+
+  // Paid detection signals = click IDs + gad_source (detection only).
+  var PAID_SIGNALS = CLICK_IDS.concat(['gad_source']);
+  var PAID_UTM_MEDIUMS = ['cpc', 'paid'];      // extend here if ROCS adopts ppc/paid_social/etc.
+
+  var EMAIL_UTM_MEDIUMS = ['email', 'e-mail', 'email_marketing', 'newsletter'];
+  var EMAIL_UTM_SOURCES = ['email', 'newsletter', 'mailchimp', 'constant_contact', 'hubspot_email'];
+
+  var SEARCH_DOMAINS = ['bing.com', 'search.yahoo.com', 'duckduckgo.com', 'ecosia.org'];
+  var GOOGLE_HOST_REGEX = /(^|\.)google\.[a-z]{2,3}(\.[a-z]{2})?$/; // google.com, google.ca, google.co.uk, ...
+  var SOCIAL_DOMAINS = ['facebook.com', 'instagram.com', 'linkedin.com', 'tiktok.com', 'x.com', 'twitter.com', 't.co'];
+
+  var INTERNAL_DOMAIN = 'rocs.org';
+  // ========================================================================
+
+  function log() {
+    if (DEBUG && window.console && window.console.log) {
+      var args = ['[ROCS-ATTR:T1]'];
+      for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
+      window.console.log.apply(window.console, args);
+    }
+  }
+
+  // ----------------------------- cookie utils -----------------------------
+
+  function rawCookiePairs() {
+    var out = [];
+    var parts = String(document.cookie || '').split(';');
+    for (var i = 0; i < parts.length; i++) {
+      var c = parts[i];
+      while (c.charAt(0) === ' ') c = c.substring(1);
+      var eq = c.indexOf('=');
+      if (eq > 0) out.push([c.substring(0, eq), c.substring(eq + 1)]);
+    }
+    return out;
+  }
+
+  function countCookie(name) {
+    var pairs = rawCookiePairs(), n = 0;
+    for (var i = 0; i < pairs.length; i++) if (pairs[i][0] === name) n++;
+    return n;
+  }
+
+  function getCookie(name) {
+    var pairs = rawCookiePairs();
+    for (var i = 0; i < pairs.length; i++) {
+      if (pairs[i][0] === name) {
+        try { return decodeURIComponent(pairs[i][1]); } catch (e) { return pairs[i][1]; }
+      }
+    }
+    return null;
+  }
+
+  function setCookie(name, value, ttlMs) {
+    try {
+      var expires = '';
+      if (ttlMs) {
+        var d = new Date();
+        d.setTime(d.getTime() + ttlMs);
+        expires = '; expires=' + d.toUTCString();
+      }
+      document.cookie = name + '=' + encodeURIComponent(value) + expires +
+        '; domain=' + COOKIE_DOMAIN + '; path=/; SameSite=Lax; Secure';
+    } catch (e) { log('cookie write failed', name, e); }
+  }
+
+  function readJsonCookie(name) {
+    var raw = getCookie(name);
+    if (!raw) return null;
+    try {
+      var obj = JSON.parse(raw);
+      return (obj && typeof obj === 'object') ? obj : null;
+    } catch (e) {
+      log('malformed JSON cookie ignored', name);
+      return null;
+    }
+  }
+
+  function writeJsonCookie(name, obj, ttlMs) {
+    try { setCookie(name, JSON.stringify(obj), ttlMs); } catch (e) { log('JSON cookie write failed', name, e); }
+  }
+
+  // Remediation: a legacy writer created HOST-ONLY copies of the paid
+  // cookies (no domain attribute), producing two cookies with the same name
+  // and different values - which one document.cookie returns first is
+  // arbitrary. When a duplicate is detected, expire the host-only copy
+  // (deletion without a domain attribute only touches the host-only cookie;
+  // the .rocs.org cookie survives). Tried at "/" and every path segment of
+  // the current URL since host-only cookies may also be path-scoped.
+  function removeHostOnlyDuplicate(name) {
+    if (countCookie(name) <= 1) return;
+    log('duplicate cookie detected, expiring host-only copy:', name);
+    var paths = ['/'];
+    var segs = String(window.location.pathname || '/').split('/');
+    var acc = '';
+    for (var i = 1; i < segs.length; i++) {
+      if (!segs[i]) continue;
+      acc += '/' + segs[i];
+      paths.push(acc);
+      paths.push(acc + '/');
+    }
+    for (var p = 0; p < paths.length; p++) {
+      try {
+        document.cookie = name + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=' + paths[p];
+      } catch (e) { /* keep trying remaining paths */ }
+    }
+    log('after remediation,', name, 'count =', countCookie(name));
+  }
+
+  // ----------------------------- classification ---------------------------
+
+  function normalizeHost(host) {
+    var h = String(host || '').toLowerCase();
+    if (h.indexOf('www.') === 0) h = h.substring(4);
+    return h;
+  }
+
+  function hostMatches(host, domain) {
+    return host === domain || host.substring(host.length - domain.length - 1) === '.' + domain;
+  }
+
+  function isInternalHost(host) {
+    return hostMatches(host, INTERNAL_DOMAIN);
+  }
+
+  function inList(value, list) {
+    if (value === null || value === undefined) return false;
+    var v = String(value).toLowerCase().replace(/^\s+|\s+$/g, '');
+    for (var i = 0; i < list.length; i++) if (list[i] === v) return true;
+    return false;
+  }
+
+  function hasPaidSignal(params) {
+    for (var i = 0; i < PAID_SIGNALS.length; i++) {
+      if (params.get(PAID_SIGNALS[i]) !== null) return true;
+    }
+    return inList(params.get('utm_medium'), PAID_UTM_MEDIUMS);
+  }
+
+  function hasEmailSignal(params) {
+    if (inList(params.get('utm_medium'), EMAIL_UTM_MEDIUMS)) return true;
+    // Conservative fallback: only exact recognized sources, never substring.
+    return inList(params.get('utm_source'), EMAIL_UTM_SOURCES);
+  }
+
+  function classifyExternalReferrer(host) {
+    if (GOOGLE_HOST_REGEX.test(host)) return 'organic_search';
+    var i;
+    for (i = 0; i < SEARCH_DOMAINS.length; i++) if (hostMatches(host, SEARCH_DOMAINS[i])) return 'organic_search';
+    for (i = 0; i < SOCIAL_DOMAINS.length; i++) if (hostMatches(host, SOCIAL_DOMAINS[i])) return 'organic_social';
+    return 'referral';
+  }
+
+  // -------------------------------- main ----------------------------------
+
+  try {
+    removeHostOnlyDuplicate(FIRST_PAID_COOKIE);
+    removeHostOnlyDuplicate(RECENT_PAID_COOKIE);
+
+    var now = new Date().getTime();
+    var currentURL = window.location.href;
+    var params;
+    try { params = new URL(currentURL).searchParams; }
+    catch (e) { params = new URLSearchParams(''); }
+
+    var refHost = '';
+    try { if (document.referrer) refHost = normalizeHost(new URL(document.referrer).hostname); }
+    catch (e) { refHost = ''; }
+    var refIsInternal = !!refHost && isInternalHost(refHost);
+    var refIsExternal = !!refHost && !refIsInternal;
+
+    var sess = readJsonCookie(SESS_COOKIE);
+    if (sess && (!sess.ts || now - sess.ts > SESSION_MINUTES * 60 * 1000)) sess = null; // belt & braces vs cookie expiry
+
+    // ---- entry detection ----
+    // Campaign-tagged URLs are ALWAYS processed as entries, even mid-session.
+    // Otherwise: no live session -> external/empty referrer is an entry
+    // (internal referrer = new-tab continuation, not an entry). With a live
+    // session, only a fresh external referrer counts (left and came back).
+    var isEntry = false;
+    var channel = null;
+
+    var urlPaid = hasPaidSignal(params);
+    if (urlPaid) {
+      isEntry = true; channel = 'paid';
+    } else if (hasEmailSignal(params)) {
+      isEntry = true; channel = 'email';
+    } else if (!sess) {
+      if (!refIsInternal) {
+        isEntry = true;
+        channel = refIsExternal ? classifyExternalReferrer(refHost) : 'direct';
+      }
+    } else if (refIsExternal) {
+      isEntry = true;
+      channel = classifyExternalReferrer(refHost);
+    }
+
+    if (isEntry) {
+      log(channel + ' entry detected', currentURL);
+      var attr = readJsonCookie(ATTR_COOKIE) || {};
+      attr.v = 1;
+      if (!attr.ids || typeof attr.ids !== 'object') attr.ids = {};
+
+      // Overall traffic channel layer
+      if (!attr.ftc) { attr.ftc = channel; log('first traffic channel set:', channel); }
+      attr.rtc = channel;
+
+      if (channel === 'paid') {
+        // PAID layer only - the nonpaid layer is untouched by design.
+        if (!getCookie(FIRST_PAID_COOKIE)) {
+          setCookie(FIRST_PAID_COOKIE, currentURL, COOKIE_EXPIRATION_DAYS * 864e5);
+          log('first paid attribution set');
+        }
+        if (getCookie(RECENT_PAID_COOKIE) !== currentURL) {
+          setCookie(RECENT_PAID_COOKIE, currentURL, COOKIE_EXPIRATION_DAYS * 864e5);
+          log('recent paid attribution updated');
+        }
+        for (var c = 0; c < CLICK_IDS.length; c++) {
+          var idVal = params.get(CLICK_IDS[c]);
+          if (idVal !== null && String(idVal).replace(/^\s+|\s+$/g, '') !== '') {
+            attr.ids[CLICK_IDS[c]] = idVal;
+            log('latest ' + CLICK_IDS[c] + ' updated');
+          }
+        }
+      } else {
+        // NONPAID layer only - paid cookies and click IDs are untouched.
+        var refDomain = refIsExternal ? refHost : '';
+        if (!attr.fnc) {
+          attr.fnc = channel;
+          if (refDomain) attr.fnr = refDomain;
+          log('first nonpaid attribution set:', channel, refDomain || '(no referrer)');
+        }
+        attr.rnc = channel;
+        if (refDomain) attr.rnr = refDomain;
+        else delete attr.rnr; // a direct/no-referrer touch must not keep an older referrer paired with it
+        log('recent nonpaid attribution updated:', channel, refDomain || '(no referrer)');
+      }
+
+      writeJsonCookie(ATTR_COOKIE, attr, COOKIE_EXPIRATION_DAYS * 864e5);
+    } else {
+      log('internal navigation / session continuation - no channel updates');
+    }
+
+    // Rolling session marker: refreshed on EVERY page view.
+    var sessCh = isEntry ? channel : (sess && sess.ch) || null;
+    writeJsonCookie(SESS_COOKIE, { ts: now, ch: sessCh }, SESSION_MINUTES * 60 * 1000);
+
+  } catch (err) {
+    log('fatal (suppressed)', err);
+  }
+})();
+</script>

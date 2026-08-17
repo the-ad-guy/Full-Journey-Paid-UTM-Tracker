@@ -1,0 +1,437 @@
+<!--
+  ROCS — Tag 2: enrollment URL injector (Salesforce attribution)
+  ==============================================================
+  Deploy as a GTM Custom HTML tag, trigger = DOM Ready - All Pages.
+  Pairs with Tag 1 ("Paid URL Attribution Cookie", Initialization), which
+  writes the state this tag reads. There is no GTM on enroll.rocs.org, so
+  everything Salesforce needs must ride on the outbound URL.
+
+  What it does:
+    - Reads all persisted attribution state (see Tag 1 header for the
+      cookie inventory) plus the live Meta (_fbc/_fbp) and GA4 cookies.
+    - Rebuilds the query string of every link whose parsed hostname is
+      EXACTLY enroll.rocs.org (never substring matching), preserving the
+      path, hash, and any unmanaged existing parameters.
+    - Decorates at DOM Ready, again on pointerdown/focusin (covers links
+      added after load, middle-click, keyboard nav), and one final
+      synchronous pass on capture-phase click. Decoration is idempotent -
+      every pass deletes-then-sets the parameters it manages, so repeated
+      runs can never create duplicates. Navigation is never delayed.
+
+  Outbound parameters (each omitted entirely when no valid value exists):
+    utm_*                          all utm_* params of first_paid_utm (first paid touch)
+    recent_utm_*                   all utm_* params of recent_paid_utm, prefixed
+    gclid gbraid wbraid fbclid
+    msclkid ttclid li_fat_id       latest stored click ID per type (max one each)
+    traffic_channel                first overall site-entry channel
+    recent_traffic_channel         most recent overall site-entry channel
+    nonpaid_channel                first nonpaid channel
+    nonpaid_referrer_domain        first nonpaid referrer domain
+    recent_nonpaid_channel         most recent nonpaid channel
+    recent_nonpaid_referrer_domain most recent nonpaid referrer domain
+    fbc fbp                        live Meta identifiers - PAID-ATTRIBUTED VISITORS ONLY
+    ga_client_id ga_session_id
+    ga_session_number              GA4 IDs of the most recent PAID session only
+
+  GA4 capture (no configuration needed):
+    - The GA4 stream is auto-discovered from the _ga_XXXXXXX cookie name
+      (the suffix IS the measurement ID minus "G-"). On rocs.org this is
+      _ga_2QJGF1YJS1 -> G-2QJGF1YJS1. If the site ever runs a second GA4
+      property, pin GA4_MEASUREMENT_ID below; with multiple _ga_* cookies
+      and no override, the session ID is deliberately skipped (a wrong-
+      property session ID would silently join to nothing forever).
+    - Client ID parses from _ga; session ID/number parse from the stream
+      cookie (both GS1 "GS1.1.<sid>.<sn>." and GS2 "GS2.1.s<sid>$o<sn>$"
+      formats). A bounded gtag('get') refresh (dataLayer arguments shim -
+      there is no global gtag() when GA4 loads via GTM) then overwrites
+      the parsed values when it responds. Max 5 retries, 1s apart. GA4 IDs
+      are captured only during PAID sessions and stored in rocs_ga, so a
+      later organic session never replaces the paid session's IDs.
+
+  Hard rules:
+    - fbc/fbp/ga_* are never sent for visitors without paid attribution,
+      never fabricated (no _fbc from fbclid), never awaited at click time.
+    - set() only, never append(). Blank / null / undefined values are
+      never injected.
+    - A managed group is only rebuilt when we hold a value for it, so
+      CMS-hardcoded params on links are not stripped from visitors with
+      no attribution of that kind.
+-->
+<script>
+(function () {
+  'use strict';
+
+  // ================================ CONFIG ================================
+  var DEBUG = false;                 // true = verbose console logging
+  var GA4_MEASUREMENT_ID = '';       // OPTIONAL override, e.g. 'G-2QJGF1YJS1'.
+                                     // Leave blank: auto-discovered from the _ga_* cookie.
+                                     // REQUIRED only if the site runs 2+ GA4 properties.
+  var ENROLL_HOST = 'enroll.rocs.org';
+  var COOKIE_DOMAIN = '.rocs.org';
+  var GA_COOKIE_TTL_MS = 730 * 864e5;
+  var GA_RETRY_MAX = 5;
+  var GA_RETRY_MS = 1000;
+
+  // KEEP IN SYNC with CLICK_IDS in Tag 1.
+  var CLICK_IDS = ['gclid', 'gbraid', 'wbraid', 'fbclid', 'msclkid', 'ttclid', 'li_fat_id'];
+
+  var ATTR_COOKIE = 'rocs_attr';
+  var SESS_COOKIE = 'rocs_sess';
+  var GA_COOKIE = 'rocs_ga';
+  var FIRST_PAID_COOKIE = 'first_paid_utm';
+  var RECENT_PAID_COOKIE = 'recent_paid_utm';
+  // ========================================================================
+
+  function log() {
+    if (DEBUG && window.console && window.console.log) {
+      var args = ['[ROCS-ATTR:T2]'];
+      for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
+      window.console.log.apply(window.console, args);
+    }
+  }
+
+  // ----------------------------- cookie utils -----------------------------
+
+  function getCookie(name) {
+    var parts = String(document.cookie || '').split(';');
+    for (var i = 0; i < parts.length; i++) {
+      var c = parts[i];
+      while (c.charAt(0) === ' ') c = c.substring(1);
+      if (c.indexOf(name + '=') === 0) {
+        var raw = c.substring(name.length + 1);
+        try { return decodeURIComponent(raw); } catch (e) { return raw; }
+      }
+    }
+    return null;
+  }
+
+  function cookieNames() {
+    var out = [];
+    var parts = String(document.cookie || '').split(';');
+    for (var i = 0; i < parts.length; i++) {
+      var c = parts[i];
+      while (c.charAt(0) === ' ') c = c.substring(1);
+      var eq = c.indexOf('=');
+      if (eq > 0) out.push(c.substring(0, eq));
+    }
+    return out;
+  }
+
+  function readJsonCookie(name) {
+    var raw = getCookie(name);
+    if (!raw) return null;
+    try {
+      var obj = JSON.parse(raw);
+      return (obj && typeof obj === 'object') ? obj : null;
+    } catch (e) { return null; }
+  }
+
+  function writeJsonCookie(name, obj, ttlMs) {
+    try {
+      var d = new Date();
+      d.setTime(d.getTime() + ttlMs);
+      document.cookie = name + '=' + encodeURIComponent(JSON.stringify(obj)) +
+        '; expires=' + d.toUTCString() +
+        '; domain=' + COOKIE_DOMAIN + '; path=/; SameSite=Lax; Secure';
+    } catch (e) { log('cookie write failed', name, e); }
+  }
+
+  // ------------------------------ value utils -----------------------------
+
+  function isValidValue(v) {
+    if (v === null || v === undefined) return false;
+    var s = String(v).replace(/^\s+|\s+$/g, '');
+    if (s === '') return false;
+    var lower = s.toLowerCase();
+    return lower !== 'null' && lower !== 'undefined';
+  }
+
+  // Only ever sets a parameter with a real value; the omission rule lives
+  // here. Delete-then-set (instead of plain set) re-appends the param at the
+  // end, so repeated decoration always emits managed params in the same
+  // canonical order and the rebuilt URL is byte-identical pass after pass.
+  function safeSet(sp, name, value) {
+    if (!isValidValue(value)) return;
+    sp['delete'](name);
+    sp.set(name, String(value).replace(/^\s+|\s+$/g, ''));
+  }
+
+  function deleteWhere(sp, predicate) {
+    var keys = [];
+    sp.forEach(function (v, k) { if (predicate(k)) keys.push(k); });
+    for (var i = 0; i < keys.length; i++) sp['delete'](keys[i]);
+  }
+
+  // All utm_* params of a stored landing URL, as [[name, value], ...].
+  function utmParamsFromURL(storedUrl) {
+    var out = [];
+    try {
+      new URL(storedUrl).searchParams.forEach(function (v, k) {
+        if (k.toLowerCase().indexOf('utm_') === 0 && isValidValue(v)) out.push([k, v]);
+      });
+    } catch (e) { log('stored paid URL unparseable, skipped'); }
+    return out;
+  }
+
+  // ------------------------------ state read ------------------------------
+
+  function readState() {
+    var s = {};
+    s.firstPaid = getCookie(FIRST_PAID_COOKIE);
+    s.recentPaid = getCookie(RECENT_PAID_COOKIE);
+    var attr = readJsonCookie(ATTR_COOKIE) || {};
+    s.ftc = attr.ftc; s.rtc = attr.rtc;
+    s.fnc = attr.fnc; s.fnr = attr.fnr;
+    s.rnc = attr.rnc; s.rnr = attr.rnr;
+    s.ids = (attr.ids && typeof attr.ids === 'object') ? attr.ids : {};
+    var sess = readJsonCookie(SESS_COOKIE);
+    s.paidSession = !!(sess && sess.ch === 'paid');
+
+    var anyId = false;
+    for (var i = 0; i < CLICK_IDS.length; i++) {
+      if (isValidValue(s.ids[CLICK_IDS[i]])) { anyId = true; break; }
+    }
+    s.anyId = anyId;
+    // "Has paid attribution" gates Meta + GA identifiers.
+    s.hasPaid = !!(s.firstPaid || s.recentPaid || anyId || s.paidSession);
+
+    // Live Meta cookies, read fresh on every pass; freshest value wins.
+    s.fbc = s.hasPaid ? getCookie('_fbc') : null;
+    s.fbp = s.hasPaid ? getCookie('_fbp') : null;
+
+    s.ga = s.hasPaid ? (readJsonCookie(GA_COOKIE) || null) : null;
+    return s;
+  }
+
+  // --------------------------- URL construction ---------------------------
+
+  function buildHref(href, s) {
+    var u;
+    try { u = new URL(href, window.location.href); } catch (e) { return null; }
+    if (u.hostname.toLowerCase() !== ENROLL_HOST) return null;
+    var sp = u.searchParams;
+    var i;
+
+    // Group 1: first paid touch -> utm_* (generic passthrough).
+    var firstUtms = s.firstPaid ? utmParamsFromURL(s.firstPaid) : [];
+    if (firstUtms.length) {
+      deleteWhere(sp, function (k) {
+        var lk = k.toLowerCase();
+        return lk.indexOf('utm_') === 0; // does not match recent_utm_*
+      });
+      for (i = 0; i < firstUtms.length; i++) safeSet(sp, firstUtms[i][0], firstUtms[i][1]);
+    }
+
+    // Group 2: recent paid touch -> recent_utm_*.
+    var recentUtms = s.recentPaid ? utmParamsFromURL(s.recentPaid) : [];
+    if (recentUtms.length) {
+      deleteWhere(sp, function (k) { return k.toLowerCase().indexOf('recent_utm_') === 0; });
+      for (i = 0; i < recentUtms.length; i++) safeSet(sp, 'recent_' + recentUtms[i][0], recentUtms[i][1]);
+    }
+
+    // Group 3: latest click IDs - max ONE of each type. If any ID is
+    // stored, all managed slots are cleared first so a stale hardcoded
+    // gclid can never coexist with the newest stored one.
+    if (s.anyId) {
+      for (i = 0; i < CLICK_IDS.length; i++) sp['delete'](CLICK_IDS[i]);
+      for (i = 0; i < CLICK_IDS.length; i++) safeSet(sp, CLICK_IDS[i], s.ids[CLICK_IDS[i]]);
+    }
+
+    // Group 4: overall traffic channel.
+    safeSet(sp, 'traffic_channel', s.ftc);
+    safeSet(sp, 'recent_traffic_channel', s.rtc);
+
+    // Group 5: nonpaid attribution. Referrer-domain params are explicitly
+    // deleted when the stored value is absent (direct touches) so an older
+    // domain never pairs with a newer touch.
+    if (isValidValue(s.fnc)) {
+      safeSet(sp, 'nonpaid_channel', s.fnc);
+      if (isValidValue(s.fnr)) safeSet(sp, 'nonpaid_referrer_domain', s.fnr);
+      else sp['delete']('nonpaid_referrer_domain');
+    }
+    if (isValidValue(s.rnc)) {
+      safeSet(sp, 'recent_nonpaid_channel', s.rnc);
+      if (isValidValue(s.rnr)) safeSet(sp, 'recent_nonpaid_referrer_domain', s.rnr);
+      else sp['delete']('recent_nonpaid_referrer_domain');
+    }
+
+    // Group 6: Meta identifiers - paid-attributed visitors only.
+    if (s.hasPaid) {
+      safeSet(sp, 'fbc', s.fbc);
+      safeSet(sp, 'fbp', s.fbp);
+    }
+
+    // Group 7: GA4 identifiers of the most recent paid session.
+    if (s.hasPaid && s.ga) {
+      safeSet(sp, 'ga_client_id', s.ga.cid);
+      safeSet(sp, 'ga_session_id', s.ga.sid);
+      safeSet(sp, 'ga_session_number', s.ga.sn);
+    }
+
+    return u.toString();
+  }
+
+  function decorateAnchor(a, s) {
+    if (!a || !a.getAttribute) return;
+    var href = a.getAttribute('href');
+    if (!href || href.indexOf(ENROLL_HOST) === -1) return; // cheap prefilter; buildHref does the exact hostname check
+    var out = buildHref(href, s);
+    if (out && out !== href) {
+      a.setAttribute('href', out);
+      log('enrollment link decorated:', out);
+    }
+  }
+
+  function decorateAll() {
+    try {
+      var s = readState();
+      var links = document.querySelectorAll('a[href*="' + ENROLL_HOST + '"]');
+      for (var i = 0; i < links.length; i++) decorateAnchor(links[i], s);
+    } catch (e) { log('decorateAll failed (suppressed)', e); }
+  }
+
+  // ------------------------------ GA4 capture -----------------------------
+
+  // Returns { mid, suffix } | { ambiguous: true } | null.
+  function resolveGaStream() {
+    if (GA4_MEASUREMENT_ID) {
+      return { mid: GA4_MEASUREMENT_ID, suffix: GA4_MEASUREMENT_ID.replace(/^G-/, '') };
+    }
+    var names = cookieNames();
+    var suffixes = [];
+    for (var i = 0; i < names.length; i++) {
+      var m = names[i].match(/^_ga_([A-Z0-9]+)$/);
+      if (m && suffixes.indexOf(m[1]) === -1) suffixes.push(m[1]);
+    }
+    if (suffixes.length === 1) return { mid: 'G-' + suffixes[0], suffix: suffixes[0] };
+    if (suffixes.length > 1) {
+      log('MULTIPLE GA4 streams found (' + suffixes.join(', ') + ') - session ID skipped. Pin GA4_MEASUREMENT_ID to fix.');
+      return { ambiguous: true };
+    }
+    return null;
+  }
+
+  function parseGaCookies() {
+    var out = {};
+    var ga = getCookie('_ga'); // e.g. GA1.1.205169932.1781794645 -> client id 205169932.1781794645
+    if (ga) {
+      var parts = ga.split('.');
+      if (parts.length >= 4) out.cid = parts.slice(2).join('.');
+    }
+    var stream = resolveGaStream();
+    if (stream && stream.suffix) {
+      var sc = getCookie('_ga_' + stream.suffix);
+      if (sc) {
+        // GS1.1.<sid>.<sn>....  or  GS2.1.s<sid>$o<sn>$g...
+        var m = sc.match(/^GS\d+\.\d+\.s?(\d+)(?:[.$]o?(\d+))?/);
+        if (m) {
+          out.sid = m[1];
+          if (m[2]) out.sn = m[2];
+        }
+      }
+    }
+    return out;
+  }
+
+  function isPaidSession() {
+    var sess = readJsonCookie(SESS_COOKIE);
+    return !!(sess && sess.ch === 'paid');
+  }
+
+  // Merge freshly captured values into rocs_ga. Existing values survive when
+  // a newer capture lacks them ("most recent successfully captured" rule).
+  function storeGa(values) {
+    if (!values || (!values.cid && !values.sid && !values.sn)) return;
+    var cur = readJsonCookie(GA_COOKIE) || {};
+    var next = {
+      v: 1,
+      cid: values.cid || cur.cid,
+      sid: values.sid || cur.sid,
+      sn: values.sn || cur.sn
+    };
+    if (!next.cid) delete next.cid;
+    if (!next.sid) delete next.sid;
+    if (!next.sn) delete next.sn;
+    writeJsonCookie(GA_COOKIE, next, GA_COOKIE_TTL_MS);
+    log('paid GA session stored', next);
+  }
+
+  var gaRetries = 0;
+  var gaGotSession = false;
+
+  // gtag('get') via the dataLayer arguments shim. When GA4 loads through
+  // GTM there is no global gtag(); pushing an arguments object onto
+  // dataLayer reaches the same command queue. Callbacks may fire late (the
+  // queue is processed when gtag.js loads) - storeGa handles whenever.
+  function attemptGtagGet() {
+    try {
+      if (!isPaidSession()) return;
+      var stream = resolveGaStream();
+      if (!stream || stream.ambiguous || !stream.mid) return;
+      if (!window.dataLayer || typeof window.dataLayer.push !== 'function') return;
+      var gtag = function () { window.dataLayer.push(arguments); };
+      gtag('get', stream.mid, 'client_id', function (v) {
+        if (v) { storeGa({ cid: String(v) }); log('GA client ID captured (gtag)'); }
+      });
+      gtag('get', stream.mid, 'session_id', function (v) {
+        if (v) { gaGotSession = true; storeGa({ sid: String(v) }); log('GA paid session ID captured (gtag)'); }
+      });
+    } catch (e) { log('gtag get failed (suppressed)', e); }
+  }
+
+  function scheduleGaRetry() {
+    if (gaGotSession || gaRetries >= GA_RETRY_MAX) return;
+    gaRetries++;
+    window.setTimeout(function () {
+      if (gaGotSession) return;
+      attemptGtagGet();
+      scheduleGaRetry();
+    }, GA_RETRY_MS);
+  }
+
+  function captureGa() {
+    try {
+      if (!isPaidSession()) return; // GA IDs represent the most recent PAID visit only
+      storeGa(parseGaCookies());    // synchronous primary - no waiting
+      attemptGtagGet();             // async, supported-API refresh
+      scheduleGaRetry();            // bounded; never blocks anything
+    } catch (e) { log('GA capture failed (suppressed)', e); }
+  }
+
+  // ------------------------------- wiring ---------------------------------
+
+  function onInteract(e) {
+    try {
+      var t = e.target;
+      var a = (t && t.closest) ? t.closest('a') : null;
+      if (!a) return;
+      var s = readState();
+      decorateAnchor(a, s);
+      // Non-blocking refresh: benefits the next pass; the click never waits.
+      if (e.type === 'pointerdown') attemptGtagGet();
+    } catch (err) { log('interaction pass failed (suppressed)', err); }
+  }
+
+  try {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', function () {
+        decorateAll();
+        captureGa();
+      });
+    } else {
+      decorateAll();
+      captureGa();
+    }
+
+    // Delegated: covers links added after load (e.g. post-form-submit
+    // buttons). pointerdown fires for every button incl. middle-click
+    // (which never produces 'click'); focusin covers keyboard users; the
+    // capture-phase click is the final synchronous pass before navigation.
+    document.addEventListener('pointerdown', onInteract, true);
+    document.addEventListener('focusin', onInteract, true);
+    document.addEventListener('click', onInteract, true);
+  } catch (err) {
+    log('fatal (suppressed)', err);
+  }
+})();
+</script>
