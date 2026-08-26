@@ -240,6 +240,97 @@ section('Link injector');
   check('no blank params emitted', !/=(&|$)/.test(new URL(d.attrs.href).search));
 }
 
+// ---------------------------------------------- journey summary
+section('Journey summary fields');
+{
+  const P = (src, id) => 'https://www.example.com/lp?utm_source=' + src + '&utm_medium=cpc&' + id;
+  const env = makeEnv('www.example.com');
+
+  env.visit(P('google', 'gclid=G1'), ''); env.runTag1();
+  check('touch 1', env.attr().ptc === 1 && env.attr().psp === 'google' && !!env.attr().fpd, env.attr());
+
+  env.advanceDays(1);
+  env.visit(P('google', 'gclid=G2'), ''); env.runTag1();
+  check('touch 2 same source collapses', env.attr().ptc === 2 && env.attr().psp === 'google', env.attr());
+
+  env.advanceDays(1);
+  env.visit(P('facebook', 'fbclid=F1'), ''); env.runTag1();
+  check('touch 3 new source appends', env.attr().ptc === 3 && env.attr().psp === 'google.facebook');
+
+  env.advanceDays(1);
+  env.visit(P('google', 'gclid=G3'), ''); env.runTag1();
+  check('touch 4 returns to google', env.attr().ptc === 4 && env.attr().psp === 'google.facebook.google');
+
+  const fpdBefore = env.attr().fpd;
+  env.advanceDays(1);
+  env.visit('https://www.example.com/', 'https://www.google.com/'); env.runTag1();
+  check('organic entry leaves journey untouched',
+    env.attr().ptc === 4 && env.attr().psp === 'google.facebook.google' && env.attr().fpd === fpdBefore);
+
+  // click-ID-derived tokens, no utm_source present
+  const e2 = makeEnv('www.example.com');
+  e2.visit('https://www.example.com/?fbclid=X', ''); e2.runTag1();
+  e2.advanceDays(1);
+  e2.visit('https://www.example.com/?msclkid=Y', ''); e2.runTag1();
+  e2.advanceDays(1);
+  e2.visit('https://www.example.com/?li_fat_id=Z', ''); e2.runTag1();
+  check('click IDs derive platform tokens', e2.attr().psp === 'facebook.bing.linkedin', e2.attr().psp);
+  check('derived token never fabricates utm_source', !(e2.get('first_utm') || '').includes('utm_source'));
+
+  // paid with no source and no click ID
+  const e3 = makeEnv('www.example.com');
+  e3.visit('https://www.example.com/?utm_medium=cpc', ''); e3.runTag1();
+  check('sourceless paid touch -> unknown', e3.attr().psp === 'unknown');
+
+  // separator-hostile source is sanitized
+  const e4 = makeEnv('www.example.com');
+  e4.visit('https://www.example.com/?utm_source=Foo.Bar%20Baz&utm_medium=cpc', ''); e4.runTag1();
+  check('source sanitized, separator safe', e4.attr().psp === 'foo-bar-baz', e4.attr().psp);
+
+  // cap: first hop always survives
+  const e5 = makeEnv('www.example.com');
+  for (let i = 0; i < 15; i++) {
+    e5.advanceDays(1);
+    e5.visit('https://www.example.com/?utm_source=s' + i + '&utm_medium=cpc', '');
+    e5.runTag1();
+  }
+  const hops = e5.attr().psp.split('.');
+  check('capped at 12 hops, first preserved',
+    hops.length === 12 && hops[0] === 's0' && hops[11] === 's14' && e5.attr().ptc === 15, e5.attr().psp);
+
+  // injector output
+  const e6 = makeEnv('www.example.com');
+  e6.visit(P('google', 'gclid=G1'), ''); e6.runTag1();
+  e6.advanceDays(1);
+  e6.visit(P('facebook', 'fbclid=F1'), ''); e6.runTag1();
+  const a6 = e6.anchor('https://app.example.com/apply');
+  e6.runTag2(['app.example.com']);
+  const q6 = new URL(a6.attrs.href).searchParams;
+  check('injector emits journey fields',
+    q6.get('utm_journey') === 'google.facebook' && q6.get('paid_touch_count') === '2' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(q6.get('first_paid_date')), a6.attrs.href);
+  check('separator survives URL encoding', a6.attrs.href.includes('utm_journey=google.facebook'));
+
+  // corrupted fpd must omit the param, never emit Invalid Date
+  const e7 = makeEnv('www.example.com');
+  e7.visit(P('google', 'gclid=G1'), ''); e7.runTag1();
+  const bad = JSON.parse(e7.get('attr_state')); bad.fpd = 'garbage';
+  e7.document.cookie = 'attr_state=' + encodeURIComponent(JSON.stringify(bad)) + '; domain=.example.com; path=/';
+  const a7 = e7.anchor('https://app.example.com/apply');
+  e7.runTag2(['app.example.com']);
+  check('corrupt fpd omitted cleanly',
+    !new URL(a7.attrs.href).searchParams.has('first_paid_date') && !/NaN|Invalid/.test(a7.attrs.href));
+
+  // organic-only visitor gets none of them
+  const e8 = makeEnv('www.example.com');
+  e8.visit('https://www.example.com/', 'https://www.bing.com/'); e8.runTag1();
+  const a8 = e8.anchor('https://app.example.com/apply');
+  e8.runTag2(['app.example.com']);
+  const q8 = new URL(a8.attrs.href).searchParams;
+  check('organic-only: no journey params',
+    !q8.has('utm_journey') && !q8.has('paid_touch_count') && !q8.has('first_paid_date'));
+}
+
 // ---------------------------------------------- brand check
 section('No brand references');
 {

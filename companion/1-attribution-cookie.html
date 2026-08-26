@@ -93,6 +93,16 @@
   // Latest-stored click IDs. KEEP IN SYNC with CLICK_IDS in Tag 2.
   var CLICK_IDS = ['gclid', 'gbraid', 'wbraid', 'fbclid', 'msclkid', 'ttclid', 'li_fat_id'];
 
+  // Platform implied by each click ID. Used ONLY to build the journey path
+  // when a paid URL carries no utm_source - never written into utm_source
+  // itself, because we do not fabricate UTM values.
+  var CLICK_ID_PLATFORMS = {
+    gclid: 'google', gbraid: 'google', wbraid: 'google', fbclid: 'facebook',
+    msclkid: 'bing', ttclid: 'tiktok', li_fat_id: 'linkedin'
+  };
+  var JOURNEY_SEP = '.';      // '.' passes through URLSearchParams unescaped
+  var JOURNEY_MAX_HOPS = 12;  // on overflow the FIRST hop is always preserved
+
   // Paid detection signals = click IDs + detection-only params.
   var PAID_SIGNALS = CLICK_IDS.concat(['gad_source']);
   var PAID_UTM_MEDIUMS = ['cpc', 'paid'];  // extend if you use ppc/paid_social/etc.
@@ -263,6 +273,25 @@
     return inList(params.get('utm_source'), EMAIL_UTM_SOURCES);
   }
 
+  // Lowercase, strip anything that could corrupt the separator, cap length.
+  function sanitizeToken(v) {
+    return String(v).toLowerCase().replace(/^\s+|\s+$/g, '')
+      .replace(/[^a-z0-9_-]/g, '-').substring(0, 20);
+  }
+
+  // utm_source if present, else the platform implied by a click ID, else
+  // 'unknown' (a paid visit with no source at all still occupies a hop).
+  function resolveSourceToken(params) {
+    var src = params.get('utm_source');
+    if (src !== null && String(src).replace(/^\s+|\s+$/g, '') !== '') return sanitizeToken(src);
+    for (var i = 0; i < CLICK_IDS.length; i++) {
+      if (params.get(CLICK_IDS[i]) !== null && CLICK_ID_PLATFORMS[CLICK_IDS[i]]) {
+        return CLICK_ID_PLATFORMS[CLICK_IDS[i]];
+      }
+    }
+    return 'unknown';
+  }
+
   function classifyExternalReferrer(host) {
     if (GOOGLE_HOST_REGEX.test(host)) return 'organic_search';
     var i;
@@ -350,6 +379,20 @@
             log('latest ' + CLICK_IDS[c] + ' updated');
           }
         }
+
+        // Journey summary. ptc counts RAW touches; the path collapses
+        // consecutive repeats so google>google>facebook reads google.facebook.
+        attr.ptc = (typeof attr.ptc === 'number' && attr.ptc > 0 ? attr.ptc : 0) + 1;
+        if (!attr.fpd) attr.fpd = now; // epoch ms; Tag 2 formats it as YYYY-MM-DD
+        var token = resolveSourceToken(params);
+        var hops = attr.psp ? String(attr.psp).split(JOURNEY_SEP) : [];
+        if (!hops.length || hops[hops.length - 1] !== token) {
+          hops.push(token);
+          // Drop the second-oldest on overflow so hop 0 stays the true first touch.
+          while (hops.length > JOURNEY_MAX_HOPS) hops.splice(1, 1);
+          attr.psp = hops.join(JOURNEY_SEP);
+        }
+        log('paid touch #' + attr.ptc + ' recorded:', token, '| journey:', attr.psp);
       } else {
         // NONPAID layer only - paid cookies and click IDs are untouched.
         var refDomain = refIsExternal ? refHost : '';

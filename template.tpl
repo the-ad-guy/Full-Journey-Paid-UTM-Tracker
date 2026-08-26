@@ -356,6 +356,38 @@ const hasEmailSignal = () => {
   return inList(getParam('utm_source'), EMAIL_SOURCES);
 };
 
+// Platform implied by each click ID. Used ONLY for the journey path when a
+// paid URL carries no utm_source - never written into utm_source itself.
+const CLICK_ID_PLATFORMS = {
+  gclid: 'google', gbraid: 'google', wbraid: 'google', fbclid: 'facebook',
+  msclkid: 'bing', ttclid: 'tiktok', li_fat_id: 'linkedin'
+};
+const JOURNEY_SEP = '.';      // passes through URL encoding unescaped
+const JOURNEY_MAX_HOPS = 12;  // on overflow the FIRST hop is always preserved
+const TOKEN_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789_-';
+
+// No RegExp in the sandbox: filter character by character.
+const sanitizeToken = (v) => {
+  const s = str(v).toLowerCase();
+  let out = '';
+  for (let i = 0; i < s.length && out.length < 20; i++) {
+    const ch = s.charAt(i);
+    out = out + (TOKEN_CHARS.indexOf(ch) === -1 ? '-' : ch);
+  }
+  return out;
+};
+
+const resolveSourceToken = () => {
+  const src = getParam('utm_source');
+  if (src !== undefined && src !== '') return sanitizeToken(src);
+  for (let i = 0; i < CLICK_IDS.length; i++) {
+    if (hasParam(CLICK_IDS[i]) && CLICK_ID_PLATFORMS[CLICK_IDS[i]]) {
+      return CLICK_ID_PLATFORMS[CLICK_IDS[i]];
+    }
+  }
+  return 'unknown';
+};
+
 const classifyReferrer = () => {
   if (isGoogleHost(refHost)) return 'organic_search';
   let i;
@@ -458,6 +490,20 @@ if (isEntry) {
         log('latest ' + CLICK_IDS[c] + ' updated');
       }
     }
+
+    // Journey summary. ptc counts RAW touches; the path collapses
+    // consecutive repeats so google>google>facebook reads google.facebook.
+    attr.ptc = (getType(attr.ptc) === 'number' && attr.ptc > 0 ? attr.ptc : 0) + 1;
+    if (!attr.fpd) attr.fpd = now; // epoch ms; Tag 2 formats it as YYYY-MM-DD
+    const token = resolveSourceToken();
+    const hops = attr.psp ? str(attr.psp).split(JOURNEY_SEP) : [];
+    if (hops.length === 0 || hops[hops.length - 1] !== token) {
+      hops.push(token);
+      // Drop the second-oldest on overflow so hop 0 stays the true first touch.
+      while (hops.length > JOURNEY_MAX_HOPS) hops.splice(1, 1);
+      attr.psp = hops.join(JOURNEY_SEP);
+    }
+    log('paid touch #' + attr.ptc + ' recorded:', token, attr.psp);
   } else {
     // NONPAID layer only - paid cookies and click IDs are untouched.
     const refDomain = refIsExternal ? refHost : '';

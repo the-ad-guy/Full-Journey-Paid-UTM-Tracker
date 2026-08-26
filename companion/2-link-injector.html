@@ -214,6 +214,17 @@
     for (var i = 0; i < keys.length; i++) sp['delete'](keys[i]);
   }
 
+  // Epoch ms -> YYYY-MM-DD (UTC). Returns null for anything unparseable, so
+  // a corrupted value omits the parameter rather than emitting Invalid Date.
+  function formatUtcDate(ms) {
+    var n = Number(ms);
+    if (!n || !isFinite(n) || n <= 0) return null;
+    var d = new Date(n);
+    if (isNaN(d.getTime())) return null;
+    var mo = d.getUTCMonth() + 1, day = d.getUTCDate();
+    return d.getUTCFullYear() + '-' + (mo < 10 ? '0' : '') + mo + '-' + (day < 10 ? '0' : '') + day;
+  }
+
   // All utm_* params of a stored landing URL, as [[name, value], ...].
   function utmParamsFromURL(storedUrl) {
     var out = [];
@@ -236,6 +247,7 @@
     s.fnc = attr.fnc; s.fnr = attr.fnr;
     s.rnc = attr.rnc; s.rnr = attr.rnr;
     s.ids = (attr.ids && typeof attr.ids === 'object') ? attr.ids : {};
+    s.ptc = attr.ptc; s.psp = attr.psp; s.fpd = attr.fpd;
     var sess = readJsonCookie(SESS_COOKIE);
     s.paidSession = !!(sess && sess.ch === 'paid');
 
@@ -293,6 +305,11 @@
       for (i = 0; i < CLICK_IDS.length; i++) sp['delete'](CLICK_IDS[i]);
       for (i = 0; i < CLICK_IDS.length; i++) safeSet(sp, CLICK_IDS[i], s.ids[CLICK_IDS[i]]);
     }
+
+    // Group 3b: paid journey summary.
+    safeSet(sp, 'paid_touch_count', s.ptc);
+    safeSet(sp, 'utm_journey', s.psp);
+    safeSet(sp, 'first_paid_date', formatUtcDate(s.fpd));
 
     // Group 4: overall traffic channel.
     safeSet(sp, 'traffic_channel', s.ftc);
