@@ -24,11 +24,46 @@ It then maintains three independent attribution layers:
 | **Paid** | `first_utm`, `recent_utm` (full landing URLs) + latest click ID per platform | First is set once, never overwritten. Recent is replaced on every paid entry. A Meta click never erases a Google click — each platform's latest ID is kept side by side. |
 | **Overall channel** | `ftc` / `rtc` in the JSON state cookie | First entry channel (set once) + most recent entry channel. |
 | **Nonpaid** | `fnc` / `fnr` / `rnc` / `rnr` in the JSON state cookie | First + recent nonpaid channel and referrer domain. A direct touch deletes the recent referrer domain rather than leaving a stale pairing. |
+| **Journey** | `psp` / `ptc` / `fpd` in the JSON state cookie | The shape of the paid journey — platform path, touch count, first-touch date. Paid entries only. |
 
 Paid is detected by click ID (`gclid`, `gbraid`, `wbraid`, `fbclid`,
 `msclkid`, `ttclid`, `li_fat_id`), by `gad_source` (detection only), or by
 `utm_medium` (`cpc`, `paid`). **`utm_source` alone never means paid** — 
 `utm_source=google&utm_medium=organic` is organic, not paid.
+
+## Paid journey summary
+
+Rather than numbering every touch (`utm_source2`, `utm_source3`, …), which
+blows past the 4 KB cookie ceiling and produces columns that are near
+impossible to report on, the tracker records the **shape** of the journey in
+three compact values:
+
+| Parameter | Example | Meaning |
+|---|---|---|
+| `utm_journey` | `google.facebook.google` | Platform path, consecutive repeats collapsed |
+| `paid_touch_count` | `11` | Raw count of qualifying paid entries |
+| `first_paid_date` | `2026-06-18` | UTC date of the first paid touch, set once |
+
+Each hop is the visit's `utm_source`; when a paid URL carries no source, the
+platform is inferred from its click ID (`fbclid` → `facebook`, `msclkid` →
+`bing`, and so on). That inferred value is used **only** for the path — it is
+never written back into `utm_source`, because the tracker does not fabricate
+UTM values.
+
+Hops are sanitized to `[a-z0-9_-]` and capped at 20 characters, so a source
+containing the separator cannot corrupt the path (`Foo.Bar Baz` →
+`foo-bar-baz`). The path caps at 12 hops, dropping the *second*-oldest on
+overflow so the first touch always survives, while `paid_touch_count` keeps
+counting past the cap.
+
+`.` is the separator because only `*`, `-`, `.` and `_` survive
+`URLSearchParams` unescaped; `-` and `_` are valid inside hops, and `*` is a
+wildcard in both Salesforce SOSL and spreadsheet criteria.
+
+`first_paid_date` is stored internally as epoch milliseconds — the GTM
+sandbox has no `Date` object, so the injector formats it. It is never
+backfilled: visitors who predate installation keep it absent rather than
+being stamped with a misleading recent date.
 
 ## Install
 
