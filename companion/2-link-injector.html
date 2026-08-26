@@ -38,9 +38,10 @@
      1. gclid                          Google Ads offline-conversion key
      2. utm_*                          every utm_* of first_paid_utm (first touch)
      3. recent_utm_*                   every utm_* of recent_paid_utm, prefixed
-     4. gbraid, wbraid, msclkid,       each network's own conversion key
-        ttclid, li_fat_id              (Google app/iOS, Microsoft, TikTok,
-                                       LinkedIn). Latest value per type.
+     4. gbraid, wbraid, fbclid,        every other click id. gbraid/wbraid
+        msclkid, ttclid, li_fat_id      are Google app/iOS keys, msclkid
+                                       Microsoft, ttclid TikTok, li_fat_id
+                                       LinkedIn. Latest value per type.
      5. fbc, fbp                       Meta Conversions API matching params.
                                        fbc is the FORMATTED click identifier
                                        (fb.1.<ts>.<fbclid>) - Meta does not
@@ -57,9 +58,7 @@
         recent_nonpaid_referrer_domain left paired with a newer touch.
      9. ga_client_id, ga_session_id,   GA4 IDs of the most recent PAID session
         ga_session_number
-    10. fbclid                         raw click id, reference only - fbc
-                                       supersedes it for uploads
-    11. (anything already on the link, re-appended in its original order)
+    10. (anything already on the link, re-appended in its original order)
 
   GA4 capture (no configuration needed):
     - The GA4 stream is auto-discovered from the _ga_XXXXXXX cookie name -
@@ -118,19 +117,19 @@
   //   gclid       the Google Ads click id, on its own (offline-conversion key)
   //   utm         first paid touch: every utm_* of the first-paid cookie
   //   recent_utm  most recent paid touch, prefixed recent_utm_*
-  //   click_ids   remaining click ids: gbraid, wbraid, msclkid, ttclid, li_fat_id
+  //   click_ids   every other click id: gbraid, wbraid, fbclid, msclkid,
+  //               ttclid, li_fat_id
   //   meta        fbc + fbp (Meta Conversions API matching params)
   //   journey     paid_touch_count, utm_journey, first_paid_date
   //   channel     traffic_channel, recent_traffic_channel
   //   nonpaid     nonpaid_* channel and referrer domain, first + recent
   //   ga          ga_client_id, ga_session_id, ga_session_number
-  //   fbclid      raw fbclid (fbc supersedes it for uploads)
   //
   // A group left out of this list is still emitted, appended after the ones
   // listed - a typo costs you position, never data. Unknown tokens are ignored.
   var PARAM_ORDER = [
     'gclid', 'utm', 'recent_utm', 'click_ids', 'meta',
-    'journey', 'channel', 'nonpaid', 'ga', 'fbclid'
+    'journey', 'channel', 'nonpaid', 'ga'
   ];
 
   var ATTR_COOKIE = 'attr_state';
@@ -238,19 +237,6 @@
     return lower !== 'null' && lower !== 'undefined';
   }
 
-  // Click IDs in OUTPUT order: gclid leads, the rest keep their configured
-  // order. Detection and storage order are unchanged - this only affects
-  // where they land in the query string. gclid and fbclid are positioned
-  // explicitly by buildHref; this supplies the order of everything between.
-  function orderedClickIds() {
-    var out = ['gclid'], i;
-    if (CLICK_IDS.indexOf('gclid') === -1) out = [];
-    for (i = 0; i < CLICK_IDS.length; i++) {
-      if (out.indexOf(CLICK_IDS[i]) === -1) out.push(CLICK_IDS[i]);
-    }
-    return out;
-  }
-
   // Epoch ms -> YYYY-MM-DD (UTC). Returns null for anything unparseable, so
   // a corrupted value omits the parameter rather than emitting Invalid Date.
   function formatUtcDate(ms) {
@@ -354,8 +340,6 @@
     var firstUtms = s.firstPaid ? utmParamsFromURL(s.firstPaid) : [];
     var recentUtms = s.recentPaid ? utmParamsFromURL(s.recentPaid) : [];
 
-    var ids = orderedClickIds();
-
     // One emitter per group. PARAM_ORDER decides the sequence they run in,
     // and therefore the order of the finished query string.
     var groups = {
@@ -378,9 +362,9 @@
       // separately so they can be positioned independently.
       click_ids: function () {
         if (!s.anyId) return;
-        for (var j = 0; j < ids.length; j++) {
-          if (ids[j] === 'gclid' || ids[j] === 'fbclid') continue;
-          put(ids[j], s.ids[ids[j]]);
+        for (var j = 0; j < CLICK_IDS.length; j++) {
+          if (CLICK_IDS[j] === 'gclid') continue; // has its own slot
+          put(CLICK_IDS[j], s.ids[CLICK_IDS[j]]);
         }
       },
 
@@ -422,17 +406,13 @@
           put('ga_session_id', s.ga.sid);
           put('ga_session_number', s.ga.sn);
         }
-      },
-
-      // Raw fbclid. fbc already contains it in the form Meta accepts, so
-      // this is reference data rather than an upload key.
-      fbclid: function () { if (s.anyId) put('fbclid', s.ids.fbclid); }
+      }
     };
 
     // Fallback sequence for any group PARAM_ORDER leaves out. Kept explicit
     // rather than relying on object key order, so the result is deterministic.
     var ALL_GROUPS = ['gclid', 'utm', 'recent_utm', 'click_ids', 'meta',
-                      'journey', 'channel', 'nonpaid', 'ga', 'fbclid'];
+                      'journey', 'channel', 'nonpaid', 'ga'];
 
     var emitted = {}, g;
     for (i = 0; i < PARAM_ORDER.length; i++) {
@@ -460,7 +440,7 @@
       if (owned[lk]) continue;
       if (dropRecentUtm && lk.indexOf('recent_utm_') === 0) continue;
       if (dropUtm && lk.indexOf('utm_') === 0) continue;
-      if (s.anyId && ids.indexOf(lk) !== -1) continue;
+      if (s.anyId && CLICK_IDS.indexOf(lk) !== -1) continue;
       survivors.push(existing[i]);
     }
 

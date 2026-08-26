@@ -362,15 +362,14 @@ section('Canonical parameter order');
   const idx = (n) => names.indexOf(n);
   check('groups follow PARAM_ORDER default',
     idx('utm_campaign') < idx('recent_utm_source') &&
-    idx('recent_utm_campaign') < idx('fbc') &&
+    idx('recent_utm_campaign') < idx('fbclid') &&
+    idx('fbclid') < idx('fbc') &&
     idx('fbp') < idx('paid_touch_count') &&
     idx('utm_journey') < idx('traffic_channel') &&
-    idx('recent_traffic_channel') < idx('nonpaid_channel') &&
-    idx('recent_nonpaid_channel') < idx('fbclid'), names);
+    idx('recent_traffic_channel') < idx('nonpaid_channel'), names);
 
-  check('raw fbclid demoted below every attribution field',
-    idx('fbclid') > idx('utm_source') && idx('fbclid') > idx('utm_journey') &&
-    idx('fbclid') > idx('nonpaid_channel'), names);
+  check('fbclid rides with click_ids, not on its own',
+    idx('fbclid') > idx('recent_utm_source') && idx('fbclid') < idx('fbc'), names);
 
   check('unmanaged params pushed to the tail in original order',
     idx('keep') === names.length - 2 && idx('other') === names.length - 1, names);
@@ -427,9 +426,10 @@ section('PARAM_ORDER is configurable');
   const e1 = makeEnv('www.example.com'); seed(e1);
   const a1 = e1.anchor('https://app.example.com/x');
   e1.runTag2(['app.example.com'],
-    ['meta', 'gclid', 'utm', 'recent_utm', 'click_ids', 'journey', 'channel', 'nonpaid', 'ga', 'fbclid']);
+    ['meta', 'gclid', 'utm', 'recent_utm', 'click_ids', 'journey', 'channel', 'nonpaid', 'ga']);
   const n1 = [...new URL(a1.attrs.href).searchParams.keys()];
   check('custom order puts meta first', n1[0] === 'fbc' && n1[1] === 'fbp' && n1[2] === 'gclid', n1);
+  check('fbclid follows click_ids position, not gclid', n1.indexOf('fbclid') > n1.indexOf('gclid'), n1);
 
   // Reverse-ish: attribution before any identifier
   const e2 = makeEnv('www.example.com'); seed(e2);
@@ -461,7 +461,7 @@ section('PARAM_ORDER is configurable');
     n4[0] === 'gclid' && n4.includes('utm_source') && n4.includes('fbp'), n4);
 
   // Custom order stays idempotent
-  const order = ['meta', 'utm', 'gclid', 'recent_utm', 'click_ids', 'journey', 'channel', 'nonpaid', 'ga', 'fbclid'];
+  const order = ['meta', 'utm', 'gclid', 'recent_utm', 'click_ids', 'journey', 'channel', 'nonpaid', 'ga'];
   const e5 = makeEnv('www.example.com'); seed(e5);
   const a5 = e5.anchor('https://app.example.com/x?keep=1');
   e5.runTag2(['app.example.com'], order);
