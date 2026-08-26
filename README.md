@@ -58,7 +58,7 @@ counting past the cap.
 
 `.` is the separator because only `*`, `-`, `.` and `_` survive
 `URLSearchParams` unescaped; `-` and `_` are valid inside hops, and `*` is a
-wildcard in both Salesforce SOSL and spreadsheet criteria.
+wildcard in most CRM full-text search syntaxes and in spreadsheet criteria.
 
 `first_paid_date` is stored internally as epoch milliseconds — the GTM
 sandbox has no `Date` object, so the injector formats it. It is never
