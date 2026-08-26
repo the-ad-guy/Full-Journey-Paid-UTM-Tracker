@@ -166,7 +166,7 @@ section('Attribution journey (generic domain)');
 
   env.visit('https://www.example.com/lp?utm_source=google&utm_medium=cpc&utm_campaign=Spring&gclid=G111', 'https://www.google.com/');
   env.runTag1();
-  check('paid entry stored', env.get('first_paid_utm') !== null && env.attr().ids.gclid === 'G111' && env.attr().ftc === 'paid');
+  check('paid entry stored', env.get('first_utm') !== null && env.attr().ids.gclid === 'G111' && env.attr().ftc === 'paid');
 
   env.advanceMinutes(5);
   env.visit('https://www.example.com/pricing', 'https://www.example.com/lp');
@@ -176,7 +176,7 @@ section('Attribution journey (generic domain)');
   env.advanceDays(2);
   env.visit('https://www.example.com/', 'https://www.google.com/');
   env.runTag1();
-  check('organic entry, paid preserved', env.attr().rtc === 'organic_search' && env.attr().fnr === 'google.com' && env.get('first_paid_utm').includes('G111'));
+  check('organic entry, paid preserved', env.attr().rtc === 'organic_search' && env.attr().fnr === 'google.com' && env.get('first_utm').includes('G111'));
 
   env.advanceDays(1);
   env.visit('https://www.example.com/', '');

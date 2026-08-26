@@ -37,16 +37,16 @@ ___TEMPLATE_PARAMETERS___
         "name": "firstPaidCookie",
         "displayName": "First-paid cookie name",
         "simpleValueType": true,
-        "defaultValue": "first_paid_utm",
-        "help": "Stores the full landing URL of the visitor's FIRST paid visit. Set once, never overwritten. Blank = default (first_paid_utm)."
+        "defaultValue": "first_utm",
+        "help": "Stores the full landing URL of the visitor's FIRST paid visit. Set once, never overwritten. Blank = default (first_utm)."
       },
       {
         "type": "TEXT",
         "name": "recentPaidCookie",
         "displayName": "Recent-paid cookie name",
         "simpleValueType": true,
-        "defaultValue": "recent_paid_utm",
-        "help": "Stores the full landing URL of the MOST RECENT paid visit. Replaced on every qualifying paid entry. Blank = default (recent_paid_utm)."
+        "defaultValue": "recent_utm",
+        "help": "Stores the full landing URL of the MOST RECENT paid visit. Replaced on every qualifying paid entry. Blank = default (recent_utm)."
       },
       {
         "type": "TEXT",
@@ -234,8 +234,8 @@ const num = (raw, fallback) => {
 };
 
 const DEBUG = !!data.debug;
-const FIRST_PAID_COOKIE = str(data.firstPaidCookie) || 'first_paid_utm';
-const RECENT_PAID_COOKIE = str(data.recentPaidCookie) || 'recent_paid_utm';
+const FIRST_PAID_COOKIE = str(data.firstPaidCookie) || 'first_utm';
+const RECENT_PAID_COOKIE = str(data.recentPaidCookie) || 'recent_utm';
 const ATTR_COOKIE = str(data.attrCookie) || 'attr_state';
 const SESS_COOKIE = str(data.sessCookie) || 'attr_sess';
 const COOKIE_DOMAIN = str(data.cookieDomain) || 'auto';
@@ -655,8 +655,8 @@ scenarios:
     runCode({});
 
     assertApi('gtmOnSuccess').wasCalled();
-    assertThat(written.first_paid_utm).isEqualTo('https://example.com/landing?utm_source=google&utm_medium=cpc&gclid=ABC123');
-    assertThat(written.recent_paid_utm).isEqualTo(written.first_paid_utm);
+    assertThat(written.first_utm).isEqualTo('https://example.com/landing?utm_source=google&utm_medium=cpc&gclid=ABC123');
+    assertThat(written.recent_utm).isEqualTo(written.first_utm);
     assertThat(written.attr_state.indexOf('"gclid":"ABC123"') >= 0).isTrue();
     assertThat(written.attr_state.indexOf('"rtc":"paid"') >= 0).isTrue();
 - name: Organic search entry never touches paid cookies
@@ -670,8 +670,8 @@ scenarios:
     runCode({});
 
     assertApi('gtmOnSuccess').wasCalled();
-    assertThat(written.first_paid_utm === undefined).isTrue();
-    assertThat(written.recent_paid_utm === undefined).isTrue();
+    assertThat(written.first_utm === undefined).isTrue();
+    assertThat(written.recent_utm === undefined).isTrue();
     assertThat(written.attr_state.indexOf('"rtc":"organic_search"') >= 0).isTrue();
     assertThat(written.attr_state.indexOf('"fnr":"google.com"') >= 0).isTrue();
 - name: utm_source alone is not paid
@@ -685,7 +685,7 @@ scenarios:
     runCode({});
 
     assertApi('gtmOnSuccess').wasCalled();
-    assertThat(written.first_paid_utm === undefined).isTrue();
+    assertThat(written.first_utm === undefined).isTrue();
     assertThat(written.attr_state.indexOf('"rtc":"direct"') >= 0).isTrue();
 - name: Custom cookie names and ignore domains are honored
   code: |-
