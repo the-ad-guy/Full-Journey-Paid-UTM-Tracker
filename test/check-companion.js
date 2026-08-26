@@ -331,6 +331,74 @@ section('Journey summary fields');
     !q8.has('utm_journey') && !q8.has('paid_touch_count') && !q8.has('first_paid_date'));
 }
 
+// ---------------------------------------------- canonical ordering
+section('Canonical parameter order');
+{
+  const env = makeEnv('www.example.com');
+  env.visit('https://www.example.com/lp?utm_source=google&utm_medium=cpc&utm_campaign=spring&gclid=G1', 'https://www.google.com/');
+  env.runTag1();
+  env.advanceDays(1);
+  env.visit('https://www.example.com/lp?utm_source=facebook&utm_medium=cpc&utm_campaign=remarket&fbclid=F1', '');
+  env.runTag1();
+  env.advanceDays(1);
+  env.visit('https://www.example.com/', ''); env.runTag1(); // direct: adds nonpaid layer
+  env.jar.push({ name: '_fbc', value: 'fb.1.9.F1', domain: '.example.com', expires: null });
+  env.jar.push({ name: '_fbp', value: 'fb.1.8.7', domain: '.example.com', expires: null });
+
+  const a = env.anchor('https://app.example.com/apply?keep=1&other=2#frag');
+  env.runTag2(['app.example.com']);
+  const names = [...new URL(a.attrs.href).searchParams.keys()];
+
+  check('gclid then fbclid lead the string', names[0] === 'gclid' && names[1] === 'fbclid', names);
+
+  const idx = (n) => names.indexOf(n);
+  check('groups in canonical order',
+    idx('gclid') < idx('utm_source') &&
+    idx('utm_campaign') < idx('recent_utm_source') &&
+    idx('recent_utm_campaign') < idx('paid_touch_count') &&
+    idx('utm_journey') < idx('traffic_channel') &&
+    idx('recent_traffic_channel') < idx('nonpaid_channel') &&
+    idx('recent_nonpaid_channel') < idx('fbc') &&
+    idx('fbp') < idx('keep'), names);
+
+  check('unmanaged params pushed to the tail in original order',
+    idx('keep') === names.length - 2 && idx('other') === names.length - 1, names);
+  check('hash preserved', a.attrs.href.endsWith('#frag'));
+
+  const first = a.attrs.href;
+  env.runTag2(['app.example.com']);
+  check('idempotent - byte-identical on re-run', a.attrs.href === first, a.attrs.href);
+  check('no duplicate names', new Set(names).size === names.length, names);
+
+  // stale hardcoded click ID is replaced, not duplicated
+  const b = env.anchor('https://app.example.com/x?gclid=STALE&wbraid=GHOST');
+  env.runTag2(['app.example.com']);
+  const bp = new URL(b.attrs.href).searchParams;
+  check('stale click IDs cleared', bp.get('gclid') === 'G1' && !bp.has('wbraid') &&
+    [...bp.keys()].filter(k => k === 'gclid').length === 1, b.attrs.href);
+
+  // never-paid visitor keeps hardcoded utm_source
+  const e2 = makeEnv('www.example.com');
+  e2.visit('https://www.example.com/', 'https://www.bing.com/'); e2.runTag1();
+  const c = e2.anchor('https://app.example.com/x?utm_source=website&gclid=HARDCODED');
+  e2.runTag2(['app.example.com']);
+  const cp = new URL(c.attrs.href).searchParams;
+  check('no paid history: hardcoded params survive',
+    cp.get('utm_source') === 'website' && cp.get('gclid') === 'HARDCODED', c.attrs.href);
+  check('no paid history: nonpaid params still emitted first',
+    [...cp.keys()][0] === 'traffic_channel', [...cp.keys()]);
+
+  // direct touch must drop a hardcoded stale referrer domain
+  const e3 = makeEnv('www.example.com');
+  e3.visit('https://www.example.com/', 'https://www.bing.com/'); e3.runTag1();
+  e3.advanceDays(1);
+  e3.visit('https://www.example.com/', ''); e3.runTag1(); // direct -> rnr deleted
+  const d = e3.anchor('https://app.example.com/x?recent_nonpaid_referrer_domain=stale.com');
+  e3.runTag2(['app.example.com']);
+  check('direct clears stale referrer param',
+    !new URL(d.attrs.href).searchParams.has('recent_nonpaid_referrer_domain'), d.attrs.href);
+}
+
 // ---------------------------------------------- brand check
 section('No brand references');
 {
