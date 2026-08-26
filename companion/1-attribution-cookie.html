@@ -26,10 +26,10 @@
          NONPAID first + most recent nonpaid channel and referrer domain
 
   Cookies written (all: path=/; SameSite=Lax; Secure):
-    first_utm   full first paid landing URL. SET ONCE, never overwritten.
+    first_paid_utm   full first paid landing URL. SET ONCE, never overwritten.
                      Stored as a complete URL so site forms can read it and
                      lift the query string verbatim.
-    recent_utm  full most recent paid landing URL.
+    recent_paid_utm  full most recent paid landing URL.
     attr_state       URL-encoded JSON:
                      { v:1,
                        ftc: first traffic channel   (set once),
@@ -85,8 +85,8 @@
   // e.g. ['checkout.stripe.com', 'accounts.google.com']
   var IGNORE_DOMAINS = [];
 
-  var FIRST_PAID_COOKIE = 'first_utm';
-  var RECENT_PAID_COOKIE = 'recent_utm';
+  var FIRST_PAID_COOKIE = 'first_paid_utm';
+  var RECENT_PAID_COOKIE = 'recent_paid_utm';
   var ATTR_COOKIE = 'attr_state';
   var SESS_COOKIE = 'attr_sess';
 

@@ -21,7 +21,7 @@ It then maintains three independent attribution layers:
 
 | Layer | Storage | Behavior |
 |---|---|---|
-| **Paid** | `first_utm`, `recent_utm` (full landing URLs) + latest click ID per platform | First is set once, never overwritten. Recent is replaced on every paid entry. A Meta click never erases a Google click — each platform's latest ID is kept side by side. |
+| **Paid** | `first_paid_utm`, `recent_paid_utm` (full landing URLs) + latest click ID per platform | First is set once, never overwritten. Recent is replaced on every paid entry. A Meta click never erases a Google click — each platform's latest ID is kept side by side. |
 | **Overall channel** | `ftc` / `rtc` in the JSON state cookie | First entry channel (set once) + most recent entry channel. |
 | **Nonpaid** | `fnc` / `fnr` / `rnc` / `rnr` in the JSON state cookie | First + recent nonpaid channel and referrer domain. A direct touch deletes the recent referrer domain rather than leaving a stale pairing. |
 | **Journey** | `psp` / `ptc` / `fpd` in the JSON state cookie | The shape of the paid journey — platform path, touch count, first-touch date. Paid entries only. |
@@ -76,8 +76,8 @@ being stamped with a misleading recent date.
 
 | Field | Default | Notes |
 |---|---|---|
-| First-paid cookie name | `first_utm` | Full URL of first paid landing, set once |
-| Recent-paid cookie name | `recent_utm` | Full URL of latest paid landing |
+| First-paid cookie name | `first_paid_utm` | Full URL of first paid landing, set once |
+| Recent-paid cookie name | `recent_paid_utm` | Full URL of latest paid landing |
 | Attribution state cookie name | `attr_state` | JSON: channels, referrer domains, latest click IDs |
 | Session cookie name | `attr_sess` | Rolling session marker |
 | Cookie domain | `auto` | e.g. `.example.com`; `auto` picks the broadest valid domain |

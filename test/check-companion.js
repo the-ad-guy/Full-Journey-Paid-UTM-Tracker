@@ -166,7 +166,7 @@ section('Attribution journey (generic domain)');
 
   env.visit('https://www.example.com/lp?utm_source=google&utm_medium=cpc&utm_campaign=Spring&gclid=G111', 'https://www.google.com/');
   env.runTag1();
-  check('paid entry stored', env.get('first_utm') !== null && env.attr().ids.gclid === 'G111' && env.attr().ftc === 'paid');
+  check('paid entry stored', env.get('first_paid_utm') !== null && env.attr().ids.gclid === 'G111' && env.attr().ftc === 'paid');
 
   env.advanceMinutes(5);
   env.visit('https://www.example.com/pricing', 'https://www.example.com/lp');
@@ -176,7 +176,7 @@ section('Attribution journey (generic domain)');
   env.advanceDays(2);
   env.visit('https://www.example.com/', 'https://www.google.com/');
   env.runTag1();
-  check('organic entry, paid preserved', env.attr().rtc === 'organic_search' && env.attr().fnr === 'google.com' && env.get('first_utm').includes('G111'));
+  check('organic entry, paid preserved', env.attr().rtc === 'organic_search' && env.attr().fnr === 'google.com' && env.get('first_paid_utm').includes('G111'));
 
   env.advanceDays(1);
   env.visit('https://www.example.com/', '');
@@ -209,7 +209,7 @@ section('Link injector');
 
   const p = new URL(a.attrs.href).searchParams;
   check('first-paid utm injected', p.get('utm_source') === 'google' && p.get('utm_medium') === 'cpc');
-  check('recent_utm injected', p.get('recent_utm_source') === 'google');
+  check('recent_paid_utm injected', p.get('recent_utm_source') === 'google');
   check('click ID injected', p.get('gclid') === 'G111');
   check('channels injected', p.get('traffic_channel') === 'paid');
   check('existing param + hash preserved', p.get('ref') === 'nav' && a.attrs.href.endsWith('#top'));
@@ -275,7 +275,7 @@ section('Journey summary fields');
   e2.advanceDays(1);
   e2.visit('https://www.example.com/?li_fat_id=Z', ''); e2.runTag1();
   check('click IDs derive platform tokens', e2.attr().psp === 'facebook.bing.linkedin', e2.attr().psp);
-  check('derived token never fabricates utm_source', !(e2.get('first_utm') || '').includes('utm_source'));
+  check('derived token never fabricates utm_source', !(e2.get('first_paid_utm') || '').includes('utm_source'));
 
   // paid with no source and no click ID
   const e3 = makeEnv('www.example.com');

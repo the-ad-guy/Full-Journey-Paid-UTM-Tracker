@@ -29,8 +29,8 @@
       runs can never create duplicates. Navigation is never delayed.
 
   Outbound parameters (each omitted entirely when no valid value exists):
-    utm_*                          all utm_* params of first_utm (first paid touch)
-    recent_utm_*                   all utm_* params of recent_utm, prefixed
+    utm_*                          all utm_* params of first_paid_utm (first paid touch)
+    recent_utm_*                   all utm_* params of recent_paid_utm, prefixed
     gclid gbraid wbraid fbclid
     msclkid ttclid li_fat_id       latest stored click ID per type (max one each)
     traffic_channel                first overall site-entry channel
@@ -96,8 +96,8 @@
   var ATTR_COOKIE = 'attr_state';
   var SESS_COOKIE = 'attr_sess';
   var GA_COOKIE = 'attr_ga';
-  var FIRST_PAID_COOKIE = 'first_utm';
-  var RECENT_PAID_COOKIE = 'recent_utm';
+  var FIRST_PAID_COOKIE = 'first_paid_utm';
+  var RECENT_PAID_COOKIE = 'recent_paid_utm';
   // ========================================================================
 
   function log() {
