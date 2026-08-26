@@ -1,6 +1,8 @@
 homepage: "https://github.com/the-ad-guy/utm-tracker"
 documentation: "https://github.com/the-ad-guy/utm-tracker#readme"
 versions:
+  - sha: 538ae5ec0ed2f1aad1f6980757ad42b891bf3c7f
+    changeNotes: Default state cookies renamed to attr_state / attr_sess.
   - sha: cf0e7b80467ce7a09575011c038372ae2e5459e0
     changeNotes: Renamed to Full Journey Paid UTM Tracker; expanded description.
   - sha: a0c9eb839f4d3c7542b1aac029b01fc28ec7b4f8
