@@ -1,7 +1,7 @@
 homepage: "https://github.com/the-ad-guy/utm-tracker"
 documentation: "https://github.com/the-ad-guy/utm-tracker#readme"
 versions:
-  - sha: 1d090b514a85816ad88cfb2ef7b61a9acb7bad5a
+  - sha: cf0e7b80467ce7a09575011c038372ae2e5459e0
     changeNotes: Renamed to Full Journey Paid UTM Tracker; expanded description.
-  - sha: 20ff74cf4ddb718cc187ef3c0712edc43c7f4f9c
+  - sha: a0c9eb839f4d3c7542b1aac029b01fc28ec7b4f8
     changeNotes: Initial release.
