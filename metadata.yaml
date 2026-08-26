@@ -1,6 +1,8 @@
 homepage: "https://github.com/the-ad-guy/utm-tracker"
 documentation: "https://github.com/the-ad-guy/utm-tracker#readme"
 versions:
+  - sha: e04075462854cb4d11d5313418bd51442be15edf
+    changeNotes: Default paid cookies renamed to first_utm / recent_utm.
   - sha: 538ae5ec0ed2f1aad1f6980757ad42b891bf3c7f
     changeNotes: Default state cookies renamed to attr_state / attr_sess.
   - sha: cf0e7b80467ce7a09575011c038372ae2e5459e0
