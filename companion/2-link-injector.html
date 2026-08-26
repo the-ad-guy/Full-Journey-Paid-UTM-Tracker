@@ -25,23 +25,40 @@
     - Decorates at DOM Ready, again on pointerdown/focusin (covers links
       added after load, middle-click, keyboard navigation), and one final
       synchronous pass on capture-phase click. Decoration is idempotent -
-      every pass deletes-then-sets the parameters it manages, so repeated
-      runs can never create duplicates. Navigation is never delayed.
+      every pass rebuilds the query from scratch in a fixed order, so
+      repeated runs produce a byte-identical URL and can never create
+      duplicates. Navigation is never delayed.
 
-  Outbound parameters (each omitted entirely when no valid value exists):
-    utm_*                          all utm_* params of first_paid_utm (first paid touch)
-    recent_utm_*                   all utm_* params of recent_paid_utm, prefixed
-    gclid gbraid wbraid fbclid
-    msclkid ttclid li_fat_id       latest stored click ID per type (max one each)
-    traffic_channel                first overall site-entry channel
-    recent_traffic_channel         most recent overall site-entry channel
-    nonpaid_channel                first nonpaid channel
-    nonpaid_referrer_domain        first nonpaid referrer domain
-    recent_nonpaid_channel         most recent nonpaid channel
-    recent_nonpaid_referrer_domain most recent nonpaid referrer domain
-    fbc fbp                        live Meta identifiers - PAID-ATTRIBUTED VISITORS ONLY
-    ga_client_id ga_session_id
-    ga_session_number              GA4 IDs of the most recent PAID session only
+  Outbound order (each parameter omitted entirely when no valid value
+  exists). Offline-conversion keys lead, so they survive if anything
+  downstream truncates the captured URL:
+
+     1. gclid                          Google Ads offline-conversion key
+     2. fbc, fbp                       Meta Conversions API matching params.
+                                       fbc is the FORMATTED click identifier
+                                       (fb.1.<ts>.<fbclid>) - Meta does not
+                                       accept a raw fbclid for uploads. fbp
+                                       matches at browser level. Both are
+                                       PAID-ATTRIBUTED VISITORS ONLY.
+     3. gbraid, wbraid, msclkid,       each network's own conversion key
+        ttclid, li_fat_id              (Google app/iOS, Microsoft, TikTok,
+                                       LinkedIn). Latest value per type.
+     4. utm_*                          every utm_* of first_paid_utm (first touch)
+     5. recent_utm_*                   every utm_* of recent_paid_utm, prefixed
+     6. paid_touch_count,              paid journey summary: raw touch count,
+        utm_journey, first_paid_date   collapsed platform path, first-touch date
+     7. traffic_channel,               overall site-entry channel, first + recent
+        recent_traffic_channel
+     8. nonpaid_channel,               nonpaid layer: channel + referrer domain,
+        nonpaid_referrer_domain,       first + recent. Referrer params are
+        recent_nonpaid_channel,        dropped on direct touches rather than
+        recent_nonpaid_referrer_domain left paired with a newer touch.
+     9. ga_client_id, ga_session_id,   GA4 IDs of the most recent PAID session
+        ga_session_number
+    10. fbclid                         raw click id, reference only - fbc
+                                       supersedes it for uploads, so this is
+                                       the first field worth losing
+    11. (anything already on the link, re-appended in its original order)
 
   GA4 capture (no configuration needed):
     - The GA4 stream is auto-discovered from the _ga_XXXXXXX cookie name -
@@ -62,8 +79,8 @@
     - fbc/fbp/ga_* are never sent for visitors without paid attribution,
       never fabricated (no _fbc synthesized from fbclid), never awaited at
       click time.
-    - set() only, never append(). Blank / null / undefined values are never
-      injected.
+    - Each managed name is written at most once. Blank / null / undefined
+      values are never injected.
     - A managed group is only rebuilt when we hold a value for it, so
       hardcoded params already on a link are not stripped from visitors with
       no attribution of that kind.
@@ -198,14 +215,13 @@
     return lower !== 'null' && lower !== 'undefined';
   }
 
-  // Click IDs in OUTPUT order: gclid and fbclid lead, the rest keep their
-  // configured order. Detection and storage order are unchanged - this only
-  // affects where they land in the query string.
+  // Click IDs in OUTPUT order: gclid leads, the rest keep their configured
+  // order. Detection and storage order are unchanged - this only affects
+  // where they land in the query string. gclid and fbclid are positioned
+  // explicitly by buildHref; this supplies the order of everything between.
   function orderedClickIds() {
-    var preferred = ['gclid', 'fbclid'], out = [], i;
-    for (i = 0; i < preferred.length; i++) {
-      if (CLICK_IDS.indexOf(preferred[i]) !== -1) out.push(preferred[i]);
-    }
+    var out = ['gclid'], i;
+    if (CLICK_IDS.indexOf('gclid') === -1) out = [];
     for (i = 0; i < CLICK_IDS.length; i++) {
       if (out.indexOf(CLICK_IDS[i]) === -1) out.push(CLICK_IDS[i]);
     }
@@ -315,17 +331,33 @@
     var firstUtms = s.firstPaid ? utmParamsFromURL(s.firstPaid) : [];
     var recentUtms = s.recentPaid ? utmParamsFromURL(s.recentPaid) : [];
 
-    // 1. Latest click IDs, gclid and fbclid first. Claiming every managed
-    //    slot kills a stale hardcoded gclid even when we hold no value for it.
     var ids = orderedClickIds();
+
+    // 1. Google Ads click identifier - the key for offline conversion imports.
+    if (s.anyId) put('gclid', s.ids.gclid);
+
+    // 2. Meta matching parameters. The Conversions API wants fbc, which is
+    //    the FORMATTED click identifier (fb.1.<ts>.<fbclid>); it does not
+    //    accept a raw fbclid. fbp is the second matching signal, and matches
+    //    browser-level even when no click identifier survived.
+    if (s.hasPaid) { put('fbc', s.fbc); put('fbp', s.fbp); }
+
+    // 3. Remaining platform click identifiers - each is its own network's
+    //    offline-conversion key (gbraid/wbraid for Google iOS and app
+    //    campaigns, msclkid for Microsoft, ttclid for TikTok, li_fat_id for
+    //    LinkedIn). Raw fbclid is deliberately excluded: fbc supersedes it,
+    //    and it is emitted last for reference only.
     if (s.anyId) {
-      for (i = 0; i < ids.length; i++) { own(ids[i]); put(ids[i], s.ids[ids[i]]); }
+      for (i = 0; i < ids.length; i++) {
+        if (ids[i] === 'gclid' || ids[i] === 'fbclid') continue;
+        put(ids[i], s.ids[ids[i]]);
+      }
     }
 
-    // 2. First paid touch -> utm_* (generic passthrough).
+    // 4. First paid touch -> utm_* (generic passthrough).
     for (i = 0; i < firstUtms.length; i++) put(firstUtms[i][0], firstUtms[i][1]);
 
-    // 3. Most recent paid touch -> recent_utm_*.
+    // 5. Most recent paid touch -> recent_utm_*.
     for (i = 0; i < recentUtms.length; i++) put('recent_' + recentUtms[i][0], recentUtms[i][1]);
 
     // 4. Paid journey summary.
@@ -351,15 +383,17 @@
       put('recent_nonpaid_referrer_domain', s.rnr);
     }
 
-    // 7. Meta identifiers - paid-attributed visitors only.
-    if (s.hasPaid) { put('fbc', s.fbc); put('fbp', s.fbp); }
-
-    // 8. GA4 identifiers of the most recent paid session.
+    // 9. GA4 identifiers of the most recent paid session.
     if (s.hasPaid && s.ga) {
       put('ga_client_id', s.ga.cid);
       put('ga_session_id', s.ga.sid);
       put('ga_session_number', s.ga.sn);
     }
+
+    // 10. Raw fbclid, last of the managed set. fbc already contains it in the
+    //     form Meta accepts, so this is reference data rather than an upload
+    //     key - it is the first thing worth losing to truncation.
+    if (s.anyId) put('fbclid', s.ids.fbclid);
 
     // 9. Everything we do not manage, in its original relative order. A whole
     //    prefix group is dropped only when we rebuilt it from stored state.

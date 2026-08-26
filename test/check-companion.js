@@ -349,17 +349,21 @@ section('Canonical parameter order');
   env.runTag2(['app.example.com']);
   const names = [...new URL(a.attrs.href).searchParams.keys()];
 
-  check('gclid then fbclid lead the string', names[0] === 'gclid' && names[1] === 'fbclid', names);
+  check('conversion-upload keys lead: gclid, fbc, fbp',
+    names[0] === 'gclid' && names[1] === 'fbc' && names[2] === 'fbp', names);
 
   const idx = (n) => names.indexOf(n);
   check('groups in canonical order',
-    idx('gclid') < idx('utm_source') &&
+    idx('fbp') < idx('utm_source') &&
     idx('utm_campaign') < idx('recent_utm_source') &&
     idx('recent_utm_campaign') < idx('paid_touch_count') &&
     idx('utm_journey') < idx('traffic_channel') &&
     idx('recent_traffic_channel') < idx('nonpaid_channel') &&
-    idx('recent_nonpaid_channel') < idx('fbc') &&
-    idx('fbp') < idx('keep'), names);
+    idx('recent_nonpaid_channel') < idx('fbclid'), names);
+
+  check('raw fbclid demoted below every attribution field',
+    idx('fbclid') > idx('utm_source') && idx('fbclid') > idx('utm_journey') &&
+    idx('fbclid') > idx('nonpaid_channel'), names);
 
   check('unmanaged params pushed to the tail in original order',
     idx('keep') === names.length - 2 && idx('other') === names.length - 1, names);
