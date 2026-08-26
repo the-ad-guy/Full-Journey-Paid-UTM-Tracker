@@ -1,31 +1,36 @@
 <!--
-  ROCS — Tag 1: attribution entry tracking + cookie state
-  ========================================================
-  Deploy as a GTM Custom HTML tag, trigger = Initialization - All Pages.
-  Firing on Initialization writes the cookies before any tag that reads them
-  (the enroll injector, analytics) and guarantees order without tag sequencing.
+  Attribution Cookie — Tag 1 of 2 (GTM Custom HTML)
+  =================================================
+  Trigger: Initialization - All Pages.
+  Firing on Initialization writes the cookies before any tag that reads them,
+  guaranteeing order without tag sequencing.
+
+  This is the Custom HTML equivalent of the "Full Journey Paid UTM Tracker"
+  GTM template. Use the template if you can (safer, configurable in the UI);
+  use this if you need to modify the logic or cannot install templates.
+
+  CONFIGURE: nothing is required. Cookie domain and internal-navigation
+  detection are derived from the current hostname automatically. Set
+  IGNORE_DOMAINS if you bounce visitors through a payment gateway or SSO
+  provider that would otherwise look like a new referral.
 
   What it does, on every page load:
-    1. Removes duplicate host-only first_paid_utm / recent_paid_utm cookies
-       (a legacy writer created host-only copies; see "remediation" below).
-    2. Decides whether this page view is a new SITE ENTRY or internal
-       navigation, using a 30-minute rolling session cookie (rocs_sess).
-    3. On a qualifying entry, classifies the channel with this precedence:
+    1. Decides whether this page view is a new SITE ENTRY or internal
+       navigation, using a 30-minute rolling session cookie.
+    2. On a qualifying entry, classifies the channel with this precedence:
          paid > email > organic_search > organic_social > referral > direct
-    4. Maintains three independent attribution layers that never overwrite
+    3. Maintains three independent attribution layers that never overwrite
        each other:
-         PAID    first_paid_utm  (full URL, set once - legacy format)
-                 recent_paid_utm (full URL, replaced per paid entry - legacy)
-                 latest click IDs per type (rocs_attr.ids)
-         OVERALL first / recent traffic channel (rocs_attr.ftc / .rtc)
-         NONPAID first / recent nonpaid channel + referrer domain
-                 (rocs_attr.fnc/.fnr/.rnc/.rnr)
+         PAID    first + most recent paid landing URL, latest click ID per type
+         OVERALL first + most recent traffic channel
+         NONPAID first + most recent nonpaid channel and referrer domain
 
-  Cookies written (all: domain=.rocs.org; path=/; SameSite=Lax; Secure):
-    first_paid_utm   full first paid landing URL. 730d. SET ONCE. Legacy
-                     format - consumed by ROCS forms. Never change format.
-    recent_paid_utm  full latest paid landing URL. 730d. Legacy format.
-    rocs_attr        URL-encoded JSON, 730d:
+  Cookies written (all: path=/; SameSite=Lax; Secure):
+    first_paid_utm   full first paid landing URL. SET ONCE, never overwritten.
+                     Stored as a complete URL so site forms can read it and
+                     lift the query string verbatim.
+    recent_paid_utm  full most recent paid landing URL.
+    attr_state       URL-encoded JSON:
                      { v:1,
                        ftc: first traffic channel   (set once),
                        rtc: recent traffic channel,
@@ -36,32 +41,31 @@
                             (DELETED, not blanked, on direct entries),
                        ids: { gclid, gbraid, wbraid, fbclid, msclkid,
                               ttclid, li_fat_id }  latest value per type }
-    rocs_sess        URL-encoded JSON { ts, ch }, 30-minute rolling expiry,
+    attr_sess        URL-encoded JSON { ts, ch }, 30-minute rolling expiry,
                      refreshed every page view. ts = last activity,
                      ch = channel of the current session's entry.
-                     A cookie (not sessionStorage) so state is shared
-                     across tabs and inactivity expiry comes free.
+                     A cookie (not sessionStorage) so state is shared across
+                     tabs and inactivity expiry comes free.
 
   "Paid" = URL has gclid | gbraid | wbraid | fbclid | msclkid | ttclid |
   li_fat_id | gad_source, OR utm_medium is in PAID_UTM_MEDIUMS (cpc, paid).
-  utm_source alone NEVER means paid. gad_source is a detection signal only;
-  no latest-ID storage for it. NOTE: the fake "lidcid" parameter from the
-  old version was removed; li_fat_id is LinkedIn's real click ID.
+  utm_source alone NEVER means paid - a source can send both paid and
+  nonpaid traffic. gad_source is a detection signal only; it is not a unique
+  click identifier, so it gets no latest-ID storage.
 
   Hard rules:
-    - Nonpaid entries never touch first_paid_utm / recent_paid_utm / ids.
+    - Nonpaid entries never touch the paid cookies or click IDs.
     - Paid entries never touch the nonpaid layer.
     - "direct" means "no detectable referrer or source" - browsers, apps,
-      privacy settings, redirects and referrer policies can all suppress
-      the referrer. We do not guess.
-    - Internal navigation (rocs.org, *.rocs.org - exact hostname suffix
-      match, never substring) updates nothing except the session marker.
+      privacy settings, redirects and referrer policies can all suppress the
+      referrer. We do not guess.
+    - Internal navigation updates nothing except the session marker.
+      Hostname matching is exact-or-subdomain, never substring, so
+      fake-example.com is not treated as example.com.
     - Every read is wrapped so a malformed cookie can never break the tag.
 
-  Paired consumers:
-    - "Enroll Now UTM Injector" (Tag 2) reads all of the above and
-      decorates enroll.rocs.org links.
-    - Landing-page forms read first_paid_utm / recent_paid_utm (unchanged).
+  Note: Safari's ITP caps JavaScript-set cookies at roughly 7 days no matter
+  what lifetime is requested. Full lifetimes hold in Chrome/Edge/Firefox.
 -->
 <script>
 (function () {
@@ -69,21 +73,29 @@
 
   // ================================ CONFIG ================================
   var DEBUG = false;                  // true = verbose console logging
-  var COOKIE_EXPIRATION_DAYS = 730;   // attribution lifetime (Safari ITP caps JS cookies at ~7d regardless)
+  var COOKIE_EXPIRATION_DAYS = 730;   // attribution lifetime
   var SESSION_MINUTES = 30;           // inactivity window defining a session
-  var COOKIE_DOMAIN = '.rocs.org';
 
-  var FIRST_PAID_COOKIE = 'first_paid_utm';    // legacy - format frozen
-  var RECENT_PAID_COOKIE = 'recent_paid_utm';  // legacy - format frozen
-  var ATTR_COOKIE = 'rocs_attr';
-  var SESS_COOKIE = 'rocs_sess';
+  // '' = auto-detect the broadest domain that accepts a cookie (recommended;
+  // shares attribution across subdomains). Or hard-code e.g. '.example.com'.
+  var COOKIE_DOMAIN = '';
+
+  // Referrer domains treated as internal - no attribution update. Use for
+  // payment gateways, SSO providers, or sister sites you own.
+  // e.g. ['checkout.stripe.com', 'accounts.google.com']
+  var IGNORE_DOMAINS = [];
+
+  var FIRST_PAID_COOKIE = 'first_paid_utm';
+  var RECENT_PAID_COOKIE = 'recent_paid_utm';
+  var ATTR_COOKIE = 'attr_state';
+  var SESS_COOKIE = 'attr_sess';
 
   // Latest-stored click IDs. KEEP IN SYNC with CLICK_IDS in Tag 2.
   var CLICK_IDS = ['gclid', 'gbraid', 'wbraid', 'fbclid', 'msclkid', 'ttclid', 'li_fat_id'];
 
-  // Paid detection signals = click IDs + gad_source (detection only).
+  // Paid detection signals = click IDs + detection-only params.
   var PAID_SIGNALS = CLICK_IDS.concat(['gad_source']);
-  var PAID_UTM_MEDIUMS = ['cpc', 'paid'];      // extend here if ROCS adopts ppc/paid_social/etc.
+  var PAID_UTM_MEDIUMS = ['cpc', 'paid'];  // extend if you use ppc/paid_social/etc.
 
   var EMAIL_UTM_MEDIUMS = ['email', 'e-mail', 'email_marketing', 'newsletter'];
   var EMAIL_UTM_SOURCES = ['email', 'newsletter', 'mailchimp', 'constant_contact', 'hubspot_email'];
@@ -92,12 +104,15 @@
   var GOOGLE_HOST_REGEX = /(^|\.)google\.[a-z]{2,3}(\.[a-z]{2})?$/; // google.com, google.ca, google.co.uk, ...
   var SOCIAL_DOMAINS = ['facebook.com', 'instagram.com', 'linkedin.com', 'tiktok.com', 'x.com', 'twitter.com', 't.co'];
 
-  var INTERNAL_DOMAIN = 'rocs.org';
+  // Remove host-only duplicates of the paid cookies. If a legacy script ever
+  // wrote them without a domain attribute, two same-name cookies exist and
+  // which value JavaScript reads is arbitrary.
+  var DEDUPE_HOST_ONLY = true;
   // ========================================================================
 
   function log() {
     if (DEBUG && window.console && window.console.log) {
-      var args = ['[ROCS-ATTR:T1]'];
+      var args = ['[UTM-TRACKER:T1]'];
       for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
       window.console.log.apply(window.console, args);
     }
@@ -133,6 +148,34 @@
     return null;
   }
 
+  // Broadest domain that will accept a cookie, found by probe. Walks from
+  // the registrable domain outward-in, so a public suffix like ".co.uk"
+  // (which browsers reject) falls through to ".example.co.uk".
+  function resolveCookieDomain() {
+    var host = String(window.location.hostname || '').toLowerCase();
+    if (!host || host.indexOf('.') === -1 || /^[\d.]+$/.test(host)) return ''; // localhost / IP -> host-only
+    var parts = host.split('.');
+    var probe = '_attr_probe';
+    for (var i = parts.length - 2; i >= 0; i--) {
+      var candidate = '.' + parts.slice(i).join('.');
+      try {
+        document.cookie = probe + '=1; domain=' + candidate + '; path=/; SameSite=Lax';
+        if (document.cookie.indexOf(probe + '=1') !== -1) {
+          document.cookie = probe + '=; domain=' + candidate +
+            '; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+          return candidate;
+        }
+      } catch (e) { /* try the next narrower candidate */ }
+    }
+    return '';
+  }
+
+  var cookieDomain = COOKIE_DOMAIN || resolveCookieDomain();
+  // Site domain for internal-navigation checks: the registrable domain when
+  // one was resolved, else the exact hostname (localhost, IP, sandboxed).
+  var siteDomain = cookieDomain ? cookieDomain.substring(1)
+                                : String(window.location.hostname || '').toLowerCase();
+
   function setCookie(name, value, ttlMs) {
     try {
       var expires = '';
@@ -142,7 +185,8 @@
         expires = '; expires=' + d.toUTCString();
       }
       document.cookie = name + '=' + encodeURIComponent(value) + expires +
-        '; domain=' + COOKIE_DOMAIN + '; path=/; SameSite=Lax; Secure';
+        (cookieDomain ? '; domain=' + cookieDomain : '') +
+        '; path=/; SameSite=Lax; Secure';
     } catch (e) { log('cookie write failed', name, e); }
   }
 
@@ -162,13 +206,9 @@
     try { setCookie(name, JSON.stringify(obj), ttlMs); } catch (e) { log('JSON cookie write failed', name, e); }
   }
 
-  // Remediation: a legacy writer created HOST-ONLY copies of the paid
-  // cookies (no domain attribute), producing two cookies with the same name
-  // and different values - which one document.cookie returns first is
-  // arbitrary. When a duplicate is detected, expire the host-only copy
-  // (deletion without a domain attribute only touches the host-only cookie;
-  // the .rocs.org cookie survives). Tried at "/" and every path segment of
-  // the current URL since host-only cookies may also be path-scoped.
+  // Expiring WITHOUT a domain attribute removes only the host-only copy; the
+  // domain-wide cookie survives. Tried at "/" and every path prefix of the
+  // current URL, since a host-only cookie may also be path-scoped.
   function removeHostOnlyDuplicate(name) {
     if (countCookie(name) <= 1) return;
     log('duplicate cookie detected, expiring host-only copy:', name);
@@ -198,11 +238,9 @@
   }
 
   function hostMatches(host, domain) {
-    return host === domain || host.substring(host.length - domain.length - 1) === '.' + domain;
-  }
-
-  function isInternalHost(host) {
-    return hostMatches(host, INTERNAL_DOMAIN);
+    if (!host || !domain) return false;
+    return host === domain ||
+      host.substring(host.length - domain.length - 1) === '.' + domain;
   }
 
   function inList(value, list) {
@@ -221,7 +259,7 @@
 
   function hasEmailSignal(params) {
     if (inList(params.get('utm_medium'), EMAIL_UTM_MEDIUMS)) return true;
-    // Conservative fallback: only exact recognized sources, never substring.
+    // Conservative fallback: exact recognized sources only, never substring.
     return inList(params.get('utm_source'), EMAIL_UTM_SOURCES);
   }
 
@@ -236,8 +274,10 @@
   // -------------------------------- main ----------------------------------
 
   try {
-    removeHostOnlyDuplicate(FIRST_PAID_COOKIE);
-    removeHostOnlyDuplicate(RECENT_PAID_COOKIE);
+    if (DEDUPE_HOST_ONLY) {
+      removeHostOnlyDuplicate(FIRST_PAID_COOKIE);
+      removeHostOnlyDuplicate(RECENT_PAID_COOKIE);
+    }
 
     var now = new Date().getTime();
     var currentURL = window.location.href;
@@ -248,7 +288,14 @@
     var refHost = '';
     try { if (document.referrer) refHost = normalizeHost(new URL(document.referrer).hostname); }
     catch (e) { refHost = ''; }
-    var refIsInternal = !!refHost && isInternalHost(refHost);
+
+    var refIsInternal = false;
+    if (refHost) {
+      if (hostMatches(refHost, siteDomain) || hostMatches(siteDomain, refHost)) refIsInternal = true;
+      for (var g = 0; !refIsInternal && g < IGNORE_DOMAINS.length; g++) {
+        if (hostMatches(refHost, String(IGNORE_DOMAINS[g]).toLowerCase())) refIsInternal = true;
+      }
+    }
     var refIsExternal = !!refHost && !refIsInternal;
 
     var sess = readJsonCookie(SESS_COOKIE);
@@ -262,8 +309,7 @@
     var isEntry = false;
     var channel = null;
 
-    var urlPaid = hasPaidSignal(params);
-    if (urlPaid) {
+    if (hasPaidSignal(params)) {
       isEntry = true; channel = 'paid';
     } else if (hasEmailSignal(params)) {
       isEntry = true; channel = 'email';
@@ -283,7 +329,7 @@
       attr.v = 1;
       if (!attr.ids || typeof attr.ids !== 'object') attr.ids = {};
 
-      // Overall traffic channel layer
+      // Overall traffic channel layer.
       if (!attr.ftc) { attr.ftc = channel; log('first traffic channel set:', channel); }
       attr.rtc = channel;
 
@@ -314,7 +360,7 @@
         }
         attr.rnc = channel;
         if (refDomain) attr.rnr = refDomain;
-        else delete attr.rnr; // a direct/no-referrer touch must not keep an older referrer paired with it
+        else delete attr.rnr; // a direct touch must not keep an older referrer paired with it
         log('recent nonpaid attribution updated:', channel, refDomain || '(no referrer)');
       }
 

@@ -43,8 +43,8 @@ Paid is detected by click ID (`gclid`, `gbraid`, `wbraid`, `fbclid`,
 |---|---|---|
 | First-paid cookie name | `first_paid_utm` | Full URL of first paid landing, set once |
 | Recent-paid cookie name | `recent_paid_utm` | Full URL of latest paid landing |
-| Attribution state cookie name | `rocs_attr` | JSON: channels, referrer domains, latest click IDs |
-| Session cookie name | `rocs_sess` | Rolling session marker |
+| Attribution state cookie name | `attr_state` | JSON: channels, referrer domains, latest click IDs |
+| Session cookie name | `attr_sess` | Rolling session marker |
 | Cookie domain | `auto` | e.g. `.example.com`; `auto` picks the broadest valid domain |
 | Cookie lifetime (days) | `730` | Safari ITP caps JS cookies at ~7 days regardless |
 | Session timeout (minutes) | `30` | Matches GA4's session model |
@@ -56,14 +56,32 @@ Paid is detected by click ID (`gclid`, `gbraid`, `wbraid`, `fbclid`,
 | Remove duplicate host-only cookies | on | Expires stray host-only copies of the paid cookies so reads are deterministic |
 | Debug logging | off | Preview-mode console logging |
 
-## Companion (Custom HTML)
+## Companion tags (Custom HTML)
 
-`companion/` contains the original Custom HTML pair this template was ported
-from, including the **Enroll Now UTM Injector**, which reads these cookies and
-decorates outbound application links with the full attribution payload
-(`utm_*`, `recent_utm_*`, click IDs, channels, Meta `fbc`/`fbp`, GA4 IDs).
-The injector remains Custom HTML for now — it needs DOM access (link
-decoration) that sandboxed templates don't provide.
+`companion/` holds a Custom HTML pair you can use instead of, or alongside,
+the template. Both are generic — configure them at the top of the file.
+
+**`1-attribution-cookie.html`** — the Custom HTML equivalent of this
+template (trigger: *Initialization – All Pages*). Use the template if you
+can; use this if you need to modify the logic or can't install templates.
+It requires no configuration: the cookie domain and internal-navigation
+detection are derived from the current hostname by probing for the broadest
+domain that accepts a cookie, which correctly handles public suffixes like
+`.co.uk`.
+
+**`2-link-injector.html`** — decorates outbound links with the full
+attribution payload (`utm_*`, `recent_utm_*`, click IDs, channels, Meta
+`fbc`/`fbp`, GA4 client/session IDs) at *DOM Ready*, on interaction, and
+once more in the click capture phase, without ever delaying navigation.
+Set `DESTINATION_HOSTS` to the hostname(s) you want decorated — it stays
+inert until you do.
+
+Use the injector when a link's destination is a system you can't put GTM
+on — a CRM application, a third-party booking or checkout flow, a partner
+portal — so everything that system needs has to ride on the URL. It stays
+Custom HTML because it needs DOM access that sandboxed templates don't
+provide. It reads the cookies written by either Tag 1 or the template, so
+cookie names must match if you change them.
 
 ## Notes
 

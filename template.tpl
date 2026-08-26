@@ -53,16 +53,16 @@ ___TEMPLATE_PARAMETERS___
         "name": "attrCookie",
         "displayName": "Attribution state cookie name",
         "simpleValueType": true,
-        "defaultValue": "rocs_attr",
-        "help": "JSON cookie holding first/recent overall channel, first/recent nonpaid channel + referrer domain, and the latest click ID per platform. Blank = default (rocs_attr)."
+        "defaultValue": "attr_state",
+        "help": "JSON cookie holding first/recent overall channel, first/recent nonpaid channel + referrer domain, and the latest click ID per platform. Blank = default (attr_state)."
       },
       {
         "type": "TEXT",
         "name": "sessCookie",
         "displayName": "Session cookie name",
         "simpleValueType": true,
-        "defaultValue": "rocs_sess",
-        "help": "Short-lived rolling session marker used to tell new site entries apart from internal navigation. Blank = default (rocs_sess)."
+        "defaultValue": "attr_sess",
+        "help": "Short-lived rolling session marker used to tell new site entries apart from internal navigation. Blank = default (attr_sess)."
       },
       {
         "type": "TEXT",
@@ -236,8 +236,8 @@ const num = (raw, fallback) => {
 const DEBUG = !!data.debug;
 const FIRST_PAID_COOKIE = str(data.firstPaidCookie) || 'first_paid_utm';
 const RECENT_PAID_COOKIE = str(data.recentPaidCookie) || 'recent_paid_utm';
-const ATTR_COOKIE = str(data.attrCookie) || 'rocs_attr';
-const SESS_COOKIE = str(data.sessCookie) || 'rocs_sess';
+const ATTR_COOKIE = str(data.attrCookie) || 'attr_state';
+const SESS_COOKIE = str(data.sessCookie) || 'attr_sess';
 const COOKIE_DOMAIN = str(data.cookieDomain) || 'auto';
 const LIFETIME_SECONDS = num(data.lifetimeDays, 730) * 86400;
 const SESSION_SECONDS = num(data.sessionMinutes, 30) * 60;
@@ -657,8 +657,8 @@ scenarios:
     assertApi('gtmOnSuccess').wasCalled();
     assertThat(written.first_paid_utm).isEqualTo('https://example.com/landing?utm_source=google&utm_medium=cpc&gclid=ABC123');
     assertThat(written.recent_paid_utm).isEqualTo(written.first_paid_utm);
-    assertThat(written.rocs_attr.indexOf('"gclid":"ABC123"') >= 0).isTrue();
-    assertThat(written.rocs_attr.indexOf('"rtc":"paid"') >= 0).isTrue();
+    assertThat(written.attr_state.indexOf('"gclid":"ABC123"') >= 0).isTrue();
+    assertThat(written.attr_state.indexOf('"rtc":"paid"') >= 0).isTrue();
 - name: Organic search entry never touches paid cookies
   code: |-
     const written = {};
@@ -672,8 +672,8 @@ scenarios:
     assertApi('gtmOnSuccess').wasCalled();
     assertThat(written.first_paid_utm === undefined).isTrue();
     assertThat(written.recent_paid_utm === undefined).isTrue();
-    assertThat(written.rocs_attr.indexOf('"rtc":"organic_search"') >= 0).isTrue();
-    assertThat(written.rocs_attr.indexOf('"fnr":"google.com"') >= 0).isTrue();
+    assertThat(written.attr_state.indexOf('"rtc":"organic_search"') >= 0).isTrue();
+    assertThat(written.attr_state.indexOf('"fnr":"google.com"') >= 0).isTrue();
 - name: utm_source alone is not paid
   code: |-
     const written = {};
@@ -686,7 +686,7 @@ scenarios:
 
     assertApi('gtmOnSuccess').wasCalled();
     assertThat(written.first_paid_utm === undefined).isTrue();
-    assertThat(written.rocs_attr.indexOf('"rtc":"direct"') >= 0).isTrue();
+    assertThat(written.attr_state.indexOf('"rtc":"direct"') >= 0).isTrue();
 - name: Custom cookie names and ignore domains are honored
   code: |-
     const written = {};
