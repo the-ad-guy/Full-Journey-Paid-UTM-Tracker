@@ -112,11 +112,18 @@ function makeEnv(hostname) {
       return a;
     },
     runTag1() { new Function('window', 'document', 'Date', TAG1)(window, document, FakeDate); },
-    runTag2(hosts) {
-      const src = TAG2.replace(
+    runTag2(hosts, paramOrder) {
+      let src = TAG2.replace(
         'var DESTINATION_HOSTS = [];',
         'var DESTINATION_HOSTS = ' + JSON.stringify(hosts || []) + ';'
       );
+      if (paramOrder) {
+        // Index-based splice rather than a regex - no escaping to get wrong.
+        const a = src.indexOf('var PARAM_ORDER = [');
+        const b = src.indexOf('];', a);
+        if (a === -1 || b === -1) throw new Error('PARAM_ORDER block not found in tag source');
+        src = src.slice(0, a) + 'var PARAM_ORDER = ' + JSON.stringify(paramOrder) + ';' + src.slice(b + 2);
+      }
       document.listeners = {};
       new Function('window', 'document', 'Date', src)(window, document, FakeDate);
     },
@@ -349,14 +356,14 @@ section('Canonical parameter order');
   env.runTag2(['app.example.com']);
   const names = [...new URL(a.attrs.href).searchParams.keys()];
 
-  check('conversion-upload keys lead: gclid, fbc, fbp',
-    names[0] === 'gclid' && names[1] === 'fbc' && names[2] === 'fbp', names);
+  check('gclid leads, then first-touch utm_*',
+    names[0] === 'gclid' && names[1] === 'utm_source', names);
 
   const idx = (n) => names.indexOf(n);
-  check('groups in canonical order',
-    idx('fbp') < idx('utm_source') &&
+  check('groups follow PARAM_ORDER default',
     idx('utm_campaign') < idx('recent_utm_source') &&
-    idx('recent_utm_campaign') < idx('paid_touch_count') &&
+    idx('recent_utm_campaign') < idx('fbc') &&
+    idx('fbp') < idx('paid_touch_count') &&
     idx('utm_journey') < idx('traffic_channel') &&
     idx('recent_traffic_channel') < idx('nonpaid_channel') &&
     idx('recent_nonpaid_channel') < idx('fbclid'), names);
@@ -401,6 +408,66 @@ section('Canonical parameter order');
   e3.runTag2(['app.example.com']);
   check('direct clears stale referrer param',
     !new URL(d.attrs.href).searchParams.has('recent_nonpaid_referrer_domain'), d.attrs.href);
+}
+
+// ---------------------------------------------- configurable order
+section('PARAM_ORDER is configurable');
+{
+  const seed = (e) => {
+    e.visit('https://www.example.com/lp?utm_source=google&utm_medium=cpc&gclid=G1', '');
+    e.runTag1();
+    e.advanceDays(1);
+    e.visit('https://www.example.com/lp?utm_source=facebook&utm_medium=cpc&fbclid=F1', '');
+    e.runTag1();
+    e.jar.push({ name: '_fbc', value: 'fb.1.9.F1', domain: '.example.com', expires: null });
+    e.jar.push({ name: '_fbp', value: 'fb.1.8.7', domain: '.example.com', expires: null });
+  };
+
+  // Meta first instead of gclid first
+  const e1 = makeEnv('www.example.com'); seed(e1);
+  const a1 = e1.anchor('https://app.example.com/x');
+  e1.runTag2(['app.example.com'],
+    ['meta', 'gclid', 'utm', 'recent_utm', 'click_ids', 'journey', 'channel', 'nonpaid', 'ga', 'fbclid']);
+  const n1 = [...new URL(a1.attrs.href).searchParams.keys()];
+  check('custom order puts meta first', n1[0] === 'fbc' && n1[1] === 'fbp' && n1[2] === 'gclid', n1);
+
+  // Reverse-ish: attribution before any identifier
+  const e2 = makeEnv('www.example.com'); seed(e2);
+  const a2 = e2.anchor('https://app.example.com/x');
+  e2.runTag2(['app.example.com'],
+    ['utm', 'recent_utm', 'journey', 'channel', 'nonpaid', 'gclid', 'click_ids', 'meta', 'ga', 'fbclid']);
+  const n2 = [...new URL(a2.attrs.href).searchParams.keys()];
+  check('custom order puts utm_* first', n2[0] === 'utm_source', n2);
+  check('gclid follows the attribution block',
+    n2.indexOf('gclid') > n2.indexOf('nonpaid_channel'), n2);
+
+  // A group omitted from PARAM_ORDER must still be emitted, not dropped
+  const e3 = makeEnv('www.example.com'); seed(e3);
+  const a3 = e3.anchor('https://app.example.com/x');
+  e3.runTag2(['app.example.com'], ['utm', 'gclid']);
+  const n3 = [...new URL(a3.attrs.href).searchParams.keys()];
+  check('omitted groups still emitted (no silent data loss)',
+    n3.includes('fbc') && n3.includes('utm_journey') && n3.includes('traffic_channel') &&
+    n3.includes('recent_utm_source') && n3.includes('fbclid'), n3);
+  check('omitted groups appended after the listed ones',
+    n3[0] === 'utm_source' && n3.indexOf('gclid') < n3.indexOf('fbc'), n3);
+
+  // Unknown tokens are ignored rather than throwing
+  const e4 = makeEnv('www.example.com'); seed(e4);
+  const a4 = e4.anchor('https://app.example.com/x');
+  e4.runTag2(['app.example.com'], ['nonsense', 'gclid', 'typo']);
+  const n4 = [...new URL(a4.attrs.href).searchParams.keys()];
+  check('unknown tokens ignored, output still complete',
+    n4[0] === 'gclid' && n4.includes('utm_source') && n4.includes('fbp'), n4);
+
+  // Custom order stays idempotent
+  const order = ['meta', 'utm', 'gclid', 'recent_utm', 'click_ids', 'journey', 'channel', 'nonpaid', 'ga', 'fbclid'];
+  const e5 = makeEnv('www.example.com'); seed(e5);
+  const a5 = e5.anchor('https://app.example.com/x?keep=1');
+  e5.runTag2(['app.example.com'], order);
+  const once = a5.attrs.href;
+  e5.runTag2(['app.example.com'], order);
+  check('custom order is idempotent', a5.attrs.href === once, a5.attrs.href);
 }
 
 // ---------------------------------------------- brand check

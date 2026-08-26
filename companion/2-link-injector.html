@@ -29,22 +29,24 @@
       repeated runs produce a byte-identical URL and can never create
       duplicates. Navigation is never delayed.
 
-  Outbound order (each parameter omitted entirely when no valid value
-  exists). Offline-conversion keys lead, so they survive if anything
-  downstream truncates the captured URL:
+  Outbound order is set by PARAM_ORDER in the config block below - rearrange
+  those tokens to change where each group lands. Order matters when something
+  downstream truncates the captured URL: whatever is first is what survives.
+  Every parameter is omitted entirely when it has no valid value.
 
+  Default order:
      1. gclid                          Google Ads offline-conversion key
-     2. fbc, fbp                       Meta Conversions API matching params.
+     2. utm_*                          every utm_* of first_paid_utm (first touch)
+     3. recent_utm_*                   every utm_* of recent_paid_utm, prefixed
+     4. gbraid, wbraid, msclkid,       each network's own conversion key
+        ttclid, li_fat_id              (Google app/iOS, Microsoft, TikTok,
+                                       LinkedIn). Latest value per type.
+     5. fbc, fbp                       Meta Conversions API matching params.
                                        fbc is the FORMATTED click identifier
                                        (fb.1.<ts>.<fbclid>) - Meta does not
                                        accept a raw fbclid for uploads. fbp
                                        matches at browser level. Both are
                                        PAID-ATTRIBUTED VISITORS ONLY.
-     3. gbraid, wbraid, msclkid,       each network's own conversion key
-        ttclid, li_fat_id              (Google app/iOS, Microsoft, TikTok,
-                                       LinkedIn). Latest value per type.
-     4. utm_*                          every utm_* of first_paid_utm (first touch)
-     5. recent_utm_*                   every utm_* of recent_paid_utm, prefixed
      6. paid_touch_count,              paid journey summary: raw touch count,
         utm_journey, first_paid_date   collapsed platform path, first-touch date
      7. traffic_channel,               overall site-entry channel, first + recent
@@ -56,8 +58,7 @@
      9. ga_client_id, ga_session_id,   GA4 IDs of the most recent PAID session
         ga_session_number
     10. fbclid                         raw click id, reference only - fbc
-                                       supersedes it for uploads, so this is
-                                       the first field worth losing
+                                       supersedes it for uploads
     11. (anything already on the link, re-appended in its original order)
 
   GA4 capture (no configuration needed):
@@ -109,6 +110,28 @@
 
   // KEEP IN SYNC with CLICK_IDS in Tag 1.
   var CLICK_IDS = ['gclid', 'gbraid', 'wbraid', 'fbclid', 'msclkid', 'ttclid', 'li_fat_id'];
+
+  // OUTPUT ORDER. Rearrange these tokens to change where each group lands in
+  // the query string. Order matters when something downstream truncates the
+  // captured URL - whatever you put first is what survives.
+  //
+  //   gclid       the Google Ads click id, on its own (offline-conversion key)
+  //   utm         first paid touch: every utm_* of the first-paid cookie
+  //   recent_utm  most recent paid touch, prefixed recent_utm_*
+  //   click_ids   remaining click ids: gbraid, wbraid, msclkid, ttclid, li_fat_id
+  //   meta        fbc + fbp (Meta Conversions API matching params)
+  //   journey     paid_touch_count, utm_journey, first_paid_date
+  //   channel     traffic_channel, recent_traffic_channel
+  //   nonpaid     nonpaid_* channel and referrer domain, first + recent
+  //   ga          ga_client_id, ga_session_id, ga_session_number
+  //   fbclid      raw fbclid (fbc supersedes it for uploads)
+  //
+  // A group left out of this list is still emitted, appended after the ones
+  // listed - a typo costs you position, never data. Unknown tokens are ignored.
+  var PARAM_ORDER = [
+    'gclid', 'utm', 'recent_utm', 'click_ids', 'meta',
+    'journey', 'channel', 'nonpaid', 'ga', 'fbclid'
+  ];
 
   var ATTR_COOKIE = 'attr_state';
   var SESS_COOKIE = 'attr_sess';
@@ -333,70 +356,102 @@
 
     var ids = orderedClickIds();
 
-    // 1. Google Ads click identifier - the key for offline conversion imports.
-    if (s.anyId) put('gclid', s.ids.gclid);
+    // One emitter per group. PARAM_ORDER decides the sequence they run in,
+    // and therefore the order of the finished query string.
+    var groups = {
+      // Google Ads click id - the key for offline conversion imports.
+      gclid: function () { if (s.anyId) put('gclid', s.ids.gclid); },
 
-    // 2. Meta matching parameters. The Conversions API wants fbc, which is
-    //    the FORMATTED click identifier (fb.1.<ts>.<fbclid>); it does not
-    //    accept a raw fbclid. fbp is the second matching signal, and matches
-    //    browser-level even when no click identifier survived.
-    if (s.hasPaid) { put('fbc', s.fbc); put('fbp', s.fbp); }
+      // First paid touch -> utm_* (generic passthrough, not a fixed list).
+      utm: function () {
+        for (var j = 0; j < firstUtms.length; j++) put(firstUtms[j][0], firstUtms[j][1]);
+      },
 
-    // 3. Remaining platform click identifiers - each is its own network's
-    //    offline-conversion key (gbraid/wbraid for Google iOS and app
-    //    campaigns, msclkid for Microsoft, ttclid for TikTok, li_fat_id for
-    //    LinkedIn). Raw fbclid is deliberately excluded: fbc supersedes it,
-    //    and it is emitted last for reference only.
-    if (s.anyId) {
-      for (i = 0; i < ids.length; i++) {
-        if (ids[i] === 'gclid' || ids[i] === 'fbclid') continue;
-        put(ids[i], s.ids[ids[i]]);
+      // Most recent paid touch -> recent_utm_*.
+      recent_utm: function () {
+        for (var j = 0; j < recentUtms.length; j++) put('recent_' + recentUtms[j][0], recentUtms[j][1]);
+      },
+
+      // Remaining click ids - each its own network's offline-conversion key
+      // (gbraid/wbraid for Google iOS and app campaigns, msclkid Microsoft,
+      // ttclid TikTok, li_fat_id LinkedIn). gclid and fbclid are placed
+      // separately so they can be positioned independently.
+      click_ids: function () {
+        if (!s.anyId) return;
+        for (var j = 0; j < ids.length; j++) {
+          if (ids[j] === 'gclid' || ids[j] === 'fbclid') continue;
+          put(ids[j], s.ids[ids[j]]);
+        }
+      },
+
+      // Meta matching params. The Conversions API wants fbc, the FORMATTED
+      // click identifier (fb.1.<ts>.<fbclid>); it does not accept a raw
+      // fbclid. fbp matches browser-level when no click id survived.
+      meta: function () { if (s.hasPaid) { put('fbc', s.fbc); put('fbp', s.fbp); } },
+
+      journey: function () {
+        put('paid_touch_count', s.ptc);
+        put('utm_journey', s.psp);
+        put('first_paid_date', formatUtcDate(s.fpd));
+      },
+
+      channel: function () {
+        put('traffic_channel', s.ftc);
+        put('recent_traffic_channel', s.rtc);
+      },
+
+      // The referrer slot is claimed alongside its channel even when empty,
+      // so a direct touch drops the older domain instead of leaving it
+      // paired with the newer touch.
+      nonpaid: function () {
+        if (isValidValue(s.fnc)) {
+          put('nonpaid_channel', s.fnc);
+          own('nonpaid_referrer_domain');
+          put('nonpaid_referrer_domain', s.fnr);
+        }
+        if (isValidValue(s.rnc)) {
+          put('recent_nonpaid_channel', s.rnc);
+          own('recent_nonpaid_referrer_domain');
+          put('recent_nonpaid_referrer_domain', s.rnr);
+        }
+      },
+
+      ga: function () {
+        if (s.hasPaid && s.ga) {
+          put('ga_client_id', s.ga.cid);
+          put('ga_session_id', s.ga.sid);
+          put('ga_session_number', s.ga.sn);
+        }
+      },
+
+      // Raw fbclid. fbc already contains it in the form Meta accepts, so
+      // this is reference data rather than an upload key.
+      fbclid: function () { if (s.anyId) put('fbclid', s.ids.fbclid); }
+    };
+
+    // Fallback sequence for any group PARAM_ORDER leaves out. Kept explicit
+    // rather than relying on object key order, so the result is deterministic.
+    var ALL_GROUPS = ['gclid', 'utm', 'recent_utm', 'click_ids', 'meta',
+                      'journey', 'channel', 'nonpaid', 'ga', 'fbclid'];
+
+    var emitted = {}, g;
+    for (i = 0; i < PARAM_ORDER.length; i++) {
+      g = PARAM_ORDER[i];
+      if (groups[g] && !emitted[g]) { groups[g](); emitted[g] = true; }
+    }
+    // A group missing from PARAM_ORDER still gets emitted, appended here -
+    // a typo costs position, never data.
+    for (i = 0; i < ALL_GROUPS.length; i++) {
+      g = ALL_GROUPS[i];
+      if (!emitted[g]) {
+        groups[g]();
+        emitted[g] = true;
+        log('PARAM_ORDER omits "' + g + '" - appended at the end.');
       }
     }
 
-    // 4. First paid touch -> utm_* (generic passthrough).
-    for (i = 0; i < firstUtms.length; i++) put(firstUtms[i][0], firstUtms[i][1]);
-
-    // 5. Most recent paid touch -> recent_utm_*.
-    for (i = 0; i < recentUtms.length; i++) put('recent_' + recentUtms[i][0], recentUtms[i][1]);
-
-    // 4. Paid journey summary.
-    put('paid_touch_count', s.ptc);
-    put('utm_journey', s.psp);
-    put('first_paid_date', formatUtcDate(s.fpd));
-
-    // 5. Overall traffic channel.
-    put('traffic_channel', s.ftc);
-    put('recent_traffic_channel', s.rtc);
-
-    // 6. Nonpaid attribution. The referrer slot is claimed alongside its
-    //    channel even when empty, so a direct touch drops the older domain
-    //    instead of leaving it paired with the newer touch.
-    if (isValidValue(s.fnc)) {
-      put('nonpaid_channel', s.fnc);
-      own('nonpaid_referrer_domain');
-      put('nonpaid_referrer_domain', s.fnr);
-    }
-    if (isValidValue(s.rnc)) {
-      put('recent_nonpaid_channel', s.rnc);
-      own('recent_nonpaid_referrer_domain');
-      put('recent_nonpaid_referrer_domain', s.rnr);
-    }
-
-    // 9. GA4 identifiers of the most recent paid session.
-    if (s.hasPaid && s.ga) {
-      put('ga_client_id', s.ga.cid);
-      put('ga_session_id', s.ga.sid);
-      put('ga_session_number', s.ga.sn);
-    }
-
-    // 10. Raw fbclid, last of the managed set. fbc already contains it in the
-    //     form Meta accepts, so this is reference data rather than an upload
-    //     key - it is the first thing worth losing to truncation.
-    if (s.anyId) put('fbclid', s.ids.fbclid);
-
-    // 9. Everything we do not manage, in its original relative order. A whole
-    //    prefix group is dropped only when we rebuilt it from stored state.
+    // Everything we do not manage, in its original relative order. A whole
+    // prefix group is dropped only when we rebuilt it from stored state.
     var dropUtm = firstUtms.length > 0;
     var dropRecentUtm = recentUtms.length > 0;
     var survivors = [];
