@@ -1,6 +1,8 @@
 homepage: "https://github.com/the-ad-guy/utm-tracker"
 documentation: "https://github.com/the-ad-guy/utm-tracker#readme"
 versions:
+  - sha: 97878850cc108364f85cf2803302de0995cc8d6e
+    changeNotes: fbclid folded into the click_ids group.
   - sha: 9b8ebc713880e9a85f21db7c3bee1337f53b535f
     changeNotes: Outbound parameter order configurable via PARAM_ORDER.
   - sha: df7f194816aab404aae388a20782aedc5ff2afe5
