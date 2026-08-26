@@ -1,7 +1,9 @@
-# UTM Attribution Tracker
+# Full Journey Paid UTM Tracker
 
-A Google Tag Manager **custom tag template** that maintains first/last-touch
-attribution cookies with strict separation between paid and nonpaid traffic.
+A Google Tag Manager **custom tag template** that tracks a visitor's full
+paid journey in first-party cookies — the first and most recent paid landing
+URLs, the latest click ID per ad platform, and first/most-recent overall and
+nonpaid channels — with strict separation between paid and nonpaid traffic.
 Nonpaid visits (organic, direct, referral, social, email) can **never**
 overwrite paid attribution.
 

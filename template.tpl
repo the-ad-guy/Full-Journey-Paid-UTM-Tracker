@@ -12,12 +12,12 @@ ___INFO___
   "id": "cvt_temp_public_id",
   "version": 1,
   "securityGroups": [],
-  "displayName": "UTM Attribution Tracker",
+  "displayName": "Full Journey Paid UTM Tracker",
   "brand": {
     "id": "brand_dummy",
     "displayName": ""
   },
-  "description": "First/last-touch attribution cookies with strict paid vs nonpaid separation. Classifies each site ENTRY (paid, email, organic_search, organic_social, referral, direct), stores first + most recent paid landing URLs, latest click ID per ad platform, and first/recent overall + nonpaid channels. Nonpaid traffic can never overwrite paid attribution. Fire on Initialization - All Pages.",
+  "description": "Tracks the full paid journey in first-party cookies: first + most recent paid landing URLs, the latest click ID per ad platform (gclid, fbclid, msclkid, ttclid, li_fat_id, gbraid, wbraid), and first/most-recent overall + nonpaid channels with referrer domains. Classifies each site ENTRY (paid, email, organic_search, organic_social, referral, direct) with strict layer separation - nonpaid traffic can never overwrite paid attribution. Fire on Initialization - All Pages.",
   "containerContexts": [
     "WEB"
   ]
