@@ -1,6 +1,8 @@
 homepage: "https://github.com/the-ad-guy/utm-tracker"
 documentation: "https://github.com/the-ad-guy/utm-tracker#readme"
 versions:
+  - sha: df7f194816aab404aae388a20782aedc5ff2afe5
+    changeNotes: Outbound params ordered by offline-conversion value.
   - sha: ac45dd436dac3907bc29d89fcbf97134e126c7cf
     changeNotes: Canonical outbound parameter order; first_paid_utm / recent_paid_utm defaults restored.
   - sha: 9ace5462a501032d2b14f89b4aab22c1d16757eb
